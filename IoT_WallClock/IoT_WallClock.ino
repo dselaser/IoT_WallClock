@@ -50,7 +50,7 @@
 
 // CDS raw 값이 이 이상이면 야간 모드 (주위 조명 꺼진 상태 → 시계만 표시)
 #define CDS_NIGHT_THRESHOLD   920
-#define BRIGHT_NIGHT            2   // 야간 모드 전용 밝기 (극저)
+#define BRIGHT_NIGHT            1   // 야간 모드 전용 밝기 (극저)
 
 #define CYCLE_MS          30000UL   // 전체 30초 주기
 #define CLOCK_PHASE_MS    15000UL   // 0~15s  : 시계
