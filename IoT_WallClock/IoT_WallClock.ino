@@ -56,8 +56,7 @@
 #define FRAME_INTERVAL_MS     50UL
 
 // CDS raw 값이 이 이상이면 야간 모드 (주위 조명 꺼진 상태 → 시계만 표시)
-#define CDS_NIGHT_THRESHOLD   920
-#define BRIGHT_NIGHT            1   // 야간 모드 전용 밝기 (극저)
+#define CDS_NIGHT_THRESHOLD   960
 
 #define CYCLE_MS          30000UL   // 전체 30초 주기
 #define CLOCK_PHASE_MS    15000UL   // 0~15s  : 시계
@@ -584,20 +583,23 @@ void readDHT() {
 void updateBrightness() {
   int raw = analogRead(CDS_PIN);    // 0..1023
 
-  // raw 350(밝음) ~ 1023(완전 어두움) → brightness 150 ~ 5
-  //   야간 최소 밝기 5: 눈부시지 않으면서도 글자가 보이는 수준
-  const int BRIGHT_MAX = 150;
-  const int BRIGHT_MIN = 5;
-  int b = map(raw, 350, 1023, BRIGHT_MAX, BRIGHT_MIN);
-  b = constrain(b, BRIGHT_MIN, BRIGHT_MAX);
+  // 밝기 구간
+  //   일반 (raw 350 ~ THRESHOLD): 150 → 5  (주위 밝기에 비례)
+  //   야간 (raw THRESHOLD ~ 1023): 4  → 1  (조명 꺼진 상태, 극저)
+  g_nightMode = (raw > CDS_NIGHT_THRESHOLD);
 
-  // 1 차 IIR 필터 (깜빡임 방지) 3:1
+  int b;
+  if (g_nightMode) {
+    b = map(raw, CDS_NIGHT_THRESHOLD, 1023, 4, 1);
+    b = constrain(b, 1, 4);
+  } else {
+    b = map(raw, 350, CDS_NIGHT_THRESHOLD, 150, 5);
+    b = constrain(b, 5, 150);
+  }
+
+  // 1차 IIR 필터 (깜빡임 방지) 3:1
   g_brightness = (uint8_t)((g_brightness * 3 + b) / 4);
   matrix.setBrightness(g_brightness);
-
-  // 야간 모드: 주위가 매우 어두우면 (조명 꺼짐) 시계만 표시 + 극저 밝기
-  g_nightMode = (raw > CDS_NIGHT_THRESHOLD);
-  if (g_nightMode) matrix.setBrightness(BRIGHT_NIGHT);
 
   static unsigned long tLog = 0;
   if (millis() - tLog > 1000) {
