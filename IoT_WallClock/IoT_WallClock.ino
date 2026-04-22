@@ -62,6 +62,8 @@
 #define CLOCK_PHASE_MS    15000UL   // 0~15s  : 시계
                                     // 15~30s : 통합 스크롤 (날짜+온습도+날씨, 15s)
 
+#define KMA_AUTH_KEY  "sQokQxRvTTiKJEMUb904bA"
+
 // 패널 배치 플래그 — 실제 모듈에 맞춰 수정 필요 (아래 주석 참고)
 #define MATRIX_FLAGS  (NEO_MATRIX_TOP + NEO_MATRIX_LEFT + \
                        NEO_MATRIX_COLUMNS + NEO_MATRIX_ZIGZAG)
@@ -94,6 +96,8 @@ float    g_humi        = NAN;    // DHT11 실내 습도 (%)
 uint8_t  g_brightness  = 20;
 bool     g_wifiOK      = false;
 bool     g_nightMode   = false;   // 야간 모드: CDS 감지 어두우면 시계만 표시
+float    g_lat         = 37.5665f;  // 위도 기본값(서울), ip-api.com으로 갱신
+float    g_lon         = 126.9780f; // 경도 기본값(서울)
 
 char     g_ssid2[33]   = {0};    // 2번째 AP SSID (EEPROM)
 char     g_pass2[65]   = {0};    // 2번째 AP 비밀번호 (EEPROM)
@@ -118,7 +122,10 @@ void loadAP2();
 void saveAP2();
 void connectWiFi();
 void fetchCityByIP();
-void fetchWeather();
+void fetchWeatherKMA();
+float fetchKMAObs(const char* obs, const char* stm1, const char* stm2);
+float parseKMAValue(const String& body);
+const char* wwToCondition(int ww);
 void fetchHolidays();
 bool isHoliday(int mon, int day);
 const char* descToCondition(const String& d);
@@ -162,7 +169,7 @@ void setup() {
 
   if (g_wifiOK) {
     fetchCityByIP();
-    fetchWeather();
+    fetchWeatherKMA();
     fetchHolidays();      // 한국 공휴일 취득 (date.nager.at)
   }
   tWeather = millis();
@@ -200,7 +207,7 @@ void loop() {
 
   if (g_wifiOK && (now - tWeather >= WEATHER_INTERVAL_MS)) {
     tWeather = now;
-    fetchWeather();
+    fetchWeatherKMA();
   }
 
   // 공휴일: 연초 자동 갱신 (연도 바뀌면 재취득)
@@ -298,12 +305,12 @@ void connectWiFi() {
 }
 
 // =============================================================================
-// IP → 도시 이름  (ip-api.com, HTTP, 키 불필요)
+// IP → 도시 이름 + 위도/경도  (ip-api.com, HTTP, 키 불필요)
 // =============================================================================
 void fetchCityByIP() {
   WiFiClient client;
   HTTPClient http;
-  if (!http.begin(client, "http://ip-api.com/json/?fields=status,city")) return;
+  if (!http.begin(client, "http://ip-api.com/json/?fields=status,city,lat,lon")) return;
   http.setTimeout(8000);
   int code = http.GET();
   if (code == 200) {
@@ -311,10 +318,11 @@ void fetchCityByIP() {
     if (!deserializeJson(doc, http.getStream())) {
       const char* st = doc["status"] | "";
       const char* ct = doc["city"]   | "";
-      if (strcmp(st, "success") == 0 && ct[0]) {
-        strlcpy(g_w.city, ct, sizeof(g_w.city));
-        Serial.print(F("[IP] city="));
-        Serial.println(g_w.city);
+      if (strcmp(st, "success") == 0) {
+        if (ct[0]) strlcpy(g_w.city, ct, sizeof(g_w.city));
+        g_lat = doc["lat"] | g_lat;
+        g_lon = doc["lon"] | g_lon;
+        Serial.printf("[IP] city=%s  lat=%.4f  lon=%.4f\n", g_w.city, g_lat, g_lon);
       }
     }
   } else {
@@ -324,67 +332,122 @@ void fetchCityByIP() {
 }
 
 // =============================================================================
-// 날씨  (wttr.in, JSON 크므로 필터 파싱)
+// ww 현천코드 → 날씨 조건 문자열  (WMO 코드 기준)
 // =============================================================================
-void fetchWeather() {
+const char* wwToCondition(int ww) {
+  if (ww <  0)  return "Cloud";
+  if (ww <= 2)  return "Sunny";   // 맑음
+  if (ww <= 9)  return "Cloud";   // 구름많음~흐림
+  if (ww <= 19) return "Fog";     // 박무·안개·번개
+  if (ww <= 49) return "Fog";     // 안개류
+  if (ww <= 69) return "Rain";    // 이슬비·비
+  if (ww <= 79) return "Snow";    // 눈
+  if (ww <= 89) return "Rain";    // 소나기
+  return "Storm";                  // 뇌우
+}
+
+// =============================================================================
+// KMA 응답 파싱: 마지막 데이터 행의 마지막 컬럼 값 추출
+//   형식: "#START7777 ... # 헤더 ... YYYYMMDDHHMM STNID VALUE #END7777"
+// =============================================================================
+float parseKMAValue(const String& body) {
+  float val = NAN;
+  int pos = 0;
+  while (pos < (int)body.length()) {
+    int nl = body.indexOf('\n', pos);
+    if (nl < 0) nl = body.length();
+    String line = body.substring(pos, nl);
+    pos = nl + 1;
+    line.trim();
+    if (line.length() == 0 || line.startsWith("#")) continue;
+    // 공백 정규화 후 마지막 토큰 추출
+    while (line.indexOf("  ") >= 0) line.replace("  ", " ");
+    int sp = line.lastIndexOf(' ');
+    String vs = (sp >= 0) ? line.substring(sp + 1) : line;
+    vs.trim();
+    float v = vs.toFloat();
+    if (v > -999.0f) val = v;   // -9999: 결측
+  }
+  return val;
+}
+
+// =============================================================================
+// 기상청 API Hub 단일 관측 요소 취득
+//   obs  : "ta"(기온), "hm"(습도), "ww"(현천코드)
+//   stm1 : 시작시각 YYYYMMDDHHMM (KST)
+//   stm2 : 종료시각 YYYYMMDDHHMM (KST)
+// =============================================================================
+float fetchKMAObs(const char* obs, const char* stm1, const char* stm2) {
+  Serial.printf("[KMA] obs=%s  heap=%u\n", obs, ESP.getFreeHeap());
+
   WiFiClientSecure client;
   client.setInsecure();
-  client.setBufferSizes(512, 512);           // 짧은 응답이라 512 바이트로 충분
+  client.setBufferSizes(1024, 512);
 
   HTTPClient http;
-  // 포맷 : "<desc>/<temp>/<humi>"  예) "Sunny/+22°C/55%"
-  String url = String("https://wttr.in/") + g_w.city + "?format=%C/%t/%h";
-  Serial.print(F("[Weather] GET "));
-  Serial.println(url);
+  String url = String("https://apihub.kma.go.kr/api/typ01/cgi-bin/url/nph-sfc_obs_nc_pt_api?obs=") +
+               obs +
+               "&tm1=" + stm1 + "&tm2=" + stm2 +
+               "&itv=60" +
+               "&lon=" + String(g_lon, 4) +
+               "&lat=" + String(g_lat, 4) +
+               "&authKey=" + KMA_AUTH_KEY;
 
-  if (!http.begin(client, url)) {
-    Serial.println(F("[Weather] http.begin failed"));
-    return;
-  }
+  if (!http.begin(client, url)) { return NAN; }
   http.setTimeout(15000);
   http.setUserAgent("curl/7.68");
-  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.setReuse(false);
 
+  float result = NAN;
   int code = http.GET();
-  Serial.printf("[Weather] http=%d  heap=%u\n", code, ESP.getFreeHeap());
-
   if (code == 200) {
     String body = http.getString();
-    body.trim();
-    Serial.print(F("[Weather] body: "));
-    Serial.println(body);
-
-    int p1 = body.indexOf('/');
-    int p2 = body.lastIndexOf('/');
-    if (p1 > 0 && p2 > p1) {
-      String desc = body.substring(0, p1);
-      String tstr = body.substring(p1 + 1, p2);   // "+22°C"
-      String hstr = body.substring(p2 + 1);       // "55%"
-
-      // 온도 파싱: 부호+숫자만 (°, C 등은 무시)
-      int sign = 1, t = 0, i = 0;
-      if (tstr.length() && tstr.charAt(0) == '+') i = 1;
-      else if (tstr.length() && tstr.charAt(0) == '-') { sign = -1; i = 1; }
-      while (i < (int)tstr.length() &&
-             tstr.charAt(i) >= '0' && tstr.charAt(i) <= '9') {
-        t = t * 10 + (tstr.charAt(i) - '0');
-        i++;
-      }
-      g_w.tempC = t * sign;
-
-      // 습도 파싱: "55%" → 55
-      g_w.humiPct = hstr.toInt();   // toInt() 는 숫자 앞부분만 파싱
-
-      strlcpy(g_w.condition, descToCondition(desc), sizeof(g_w.condition));
-      g_w.valid = true;
-      Serial.printf("[Weather] %s %dC %d%% desc=\"%s\" -> %s\n",
-                    g_w.city, g_w.tempC, g_w.humiPct, desc.c_str(), g_w.condition);
-    } else {
-      Serial.println(F("[Weather] parse fail"));
-    }
+    Serial.printf("[KMA/%s] body: %s\n", obs, body.c_str());
+    result = parseKMAValue(body);
+    Serial.printf("[KMA/%s] value=%.1f\n", obs, result);
+  } else {
+    Serial.printf("[KMA/%s] http=%d\n", obs, code);
   }
   http.end();
+  client.stop();
+  delay(200);   // SSL 버퍼 해제 대기
+  return result;
+}
+
+// =============================================================================
+// 기상청 날씨 취득  (기온·습도·현천코드, KMA API Hub)
+// =============================================================================
+void fetchWeatherKMA() {
+  time_t now_t = time(nullptr);
+  if (now_t < 100000UL) {
+    Serial.println(F("[KMA] NTP not ready"));
+    return;
+  }
+
+  // KST 시각 → tm1(2시간 전), tm2(현재)
+  char stm1[13], stm2[13];
+  struct tm lt2, lt1;
+  localtime_r(&now_t,          &lt2);
+  time_t t1 = now_t - 7200;
+  localtime_r(&t1,             &lt1);
+  strftime(stm2, sizeof(stm2), "%Y%m%d%H%M", &lt2);
+  strftime(stm1, sizeof(stm1), "%Y%m%d%H%M", &lt1);
+  Serial.printf("[KMA] window %s ~ %s  lat=%.4f lon=%.4f\n",
+                stm1, stm2, g_lat, g_lon);
+
+  float ta = fetchKMAObs("ta", stm1, stm2);   // 기온 (°C)
+  float hm = fetchKMAObs("hm", stm1, stm2);   // 습도 (%)
+  float ww = fetchKMAObs("ww", stm1, stm2);   // 현천코드
+
+  if (!isnan(ta)) {
+    g_w.tempC   = (int)roundf(ta);
+    g_w.humiPct = isnan(hm) ? 0 : (int)roundf(hm);
+    strlcpy(g_w.condition, wwToCondition(isnan(ww) ? -1 : (int)ww), sizeof(g_w.condition));
+    g_w.valid   = true;
+    Serial.printf("[KMA] %s  %dC  %d%%  ww=%d  -> %s\n",
+                  g_w.city, g_w.tempC, g_w.humiPct, isnan(ww)?-1:(int)ww, g_w.condition);
+  } else {
+    Serial.println(F("[KMA] ta missing, keep previous"));
+  }
 }
 
 // =============================================================================
