@@ -19,16 +19,23 @@
 // =============================================================================
 
 #include <ESP8266WiFi.h>
+#include <ESP8266WiFiMulti.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
+#include <EEPROM.h>
 #include <ArduinoJson.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_NeoMatrix.h>
 #include <Adafruit_NeoPixel.h>
 #include <DHT.h>
 #include <time.h>
+
+// --------------------------- 2nd AP (EEPROM) ----------------------------------
+#define EEPROM_SIZE       96
+#define EEPROM_SSID2_OFS   0   // 32 bytes
+#define EEPROM_PASS2_OFS  32   // 64 bytes
 
 // --------------------------- 핀 / 상수 ---------------------------------------
 #define LED_PIN     D1
@@ -72,6 +79,7 @@
 Adafruit_NeoMatrix matrix(MATRIX_W, MATRIX_H, LED_PIN,
                           MATRIX_FLAGS, NEO_GRB + NEO_KHZ800);
 DHT dht(DHT_PIN, DHT_TYPE);
+ESP8266WiFiMulti g_wifiMulti;
 
 struct WeatherInfo {
   char city[32];
@@ -87,6 +95,9 @@ float    g_humi        = NAN;    // DHT11 실내 습도 (%)
 uint8_t  g_brightness  = 20;
 bool     g_wifiOK      = false;
 bool     g_nightMode   = false;   // 야간 모드: CDS 감지 어두우면 시계만 표시
+
+char     g_ssid2[33]   = {0};    // 2번째 AP SSID (EEPROM)
+char     g_pass2[65]   = {0};    // 2번째 AP 비밀번호 (EEPROM)
 
 // 공휴일 (date.nager.at, 최대 30개, 연초 자동 갱신)
 struct HoliDay { uint8_t mon; uint8_t day; };
@@ -104,6 +115,8 @@ int      scrollX       = MATRIX_W;   // 통합 스크롤
 bool     scrollDone    = false;       // 스크롤 완료 플래그
 
 // --------------------------- 전방 선언 ---------------------------------------
+void loadAP2();
+void saveAP2();
 void connectWiFi();
 void fetchCityByIP();
 void fetchWeather();
@@ -164,7 +177,16 @@ void loop() {
 
   if (now - tWiFi >= WIFI_CHECK_INTERVAL) {
     tWiFi = now;
-    g_wifiOK = (WiFi.status() == WL_CONNECTED);
+    if (WiFi.status() == WL_CONNECTED) {
+      g_wifiOK = true;
+    } else {
+      // 연결 끊김 → WiFiMulti로 재스캔 (신호 강한 AP 자동 선택)
+      Serial.println(F("[WiFi] disconnected, scanning..."));
+      g_wifiOK = (g_wifiMulti.run(8000) == WL_CONNECTED);
+      if (g_wifiOK) {
+        Serial.printf("[WiFi] reconnected → %s\n", WiFi.SSID().c_str());
+      }
+    }
   }
 
   if (now - tDHT >= DHT_INTERVAL_MS) {
@@ -198,24 +220,82 @@ void loop() {
 }
 
 // =============================================================================
-// WiFi / Captive Portal
+// EEPROM : 2번째 AP 저장 / 로드
+// =============================================================================
+void loadAP2() {
+  EEPROM.begin(EEPROM_SIZE);
+  for (int i = 0; i < 32; i++) g_ssid2[i] = (char)EEPROM.read(EEPROM_SSID2_OFS + i);
+  for (int i = 0; i < 64; i++) g_pass2[i] = (char)EEPROM.read(EEPROM_PASS2_OFS + i);
+  EEPROM.end();
+  g_ssid2[32] = '\0';
+  g_pass2[64] = '\0';
+  // 비정상 데이터(첫 부팅) 방어
+  for (int i = 0; i < 32; i++) {
+    char c = g_ssid2[i];
+    if (c != 0 && (c < 0x20 || c > 0x7E)) {
+      memset(g_ssid2, 0, sizeof(g_ssid2));
+      memset(g_pass2, 0, sizeof(g_pass2));
+      break;
+    }
+  }
+  if (g_ssid2[0]) Serial.printf("[EEPROM] AP2 loaded: '%s'\n", g_ssid2);
+}
+
+void saveAP2() {
+  EEPROM.begin(EEPROM_SIZE);
+  for (int i = 0; i < 32; i++) EEPROM.write(EEPROM_SSID2_OFS + i, (uint8_t)g_ssid2[i]);
+  for (int i = 0; i < 64; i++) EEPROM.write(EEPROM_PASS2_OFS + i, (uint8_t)g_pass2[i]);
+  EEPROM.commit();
+  EEPROM.end();
+  Serial.printf("[EEPROM] AP2 saved: '%s'\n", g_ssid2);
+}
+
+// =============================================================================
+// WiFi / Captive Portal  (1번 AP: WiFiManager, 2번 AP: 커스텀 파라미터)
 // =============================================================================
 void connectWiFi() {
+  loadAP2();
+
+  // WiFiManager 커스텀 파라미터 (2번째 AP 입력 필드)
+  WiFiManagerParameter p_ssid2("ssid2", "2nd WiFi SSID (선택)", g_ssid2, 32);
+  WiFiManagerParameter p_pass2("pass2", "2nd WiFi Password", g_pass2, 64);
+
+  bool needSave = false;
   WiFiManager wm;
-  wm.setConfigPortalTimeout(180);     // 3 분 안에 설정 없으면 재시도
+  wm.addParameter(&p_ssid2);
+  wm.addParameter(&p_pass2);
+  wm.setSaveConfigCallback([&needSave]() { needSave = true; });
+  wm.setConfigPortalTimeout(180);
   wm.setConnectTimeout(20);
 
-  // 이전 접속 정보가 있으면 그대로 접속, 없거나 실패하면 AP 모드
-  // AP SSID: IoTClock-Setup, 비밀번호 없음 → 휴대폰으로 접속 시 captive portal
-  String apName = "IoTClock-Setup";
-  if (!wm.autoConnect(apName.c_str())) {
+  if (!wm.autoConnect("IoTClock-Setup")) {
     Serial.println(F("[WiFi] portal timeout, restart"));
     delay(500);
     ESP.restart();
   }
+
+  // 포털에서 저장 버튼 눌렸으면 2번 AP 정보 기록
+  if (needSave) {
+    strncpy(g_ssid2, p_ssid2.getValue(), 32);  g_ssid2[32] = '\0';
+    strncpy(g_pass2, p_pass2.getValue(), 64);  g_pass2[64] = '\0';
+    saveAP2();
+  }
+
+  // WiFiMulti에 1번+2번 AP 등록
+  String ssid1 = WiFi.SSID();
+  String psk1  = WiFi.psk();
+  if (ssid1.length() > 0) {
+    g_wifiMulti.addAP(ssid1.c_str(), psk1.c_str());
+    Serial.printf("[WiFi] AP1: '%s'\n", ssid1.c_str());
+  }
+  if (g_ssid2[0]) {
+    g_wifiMulti.addAP(g_ssid2, g_pass2);
+    Serial.printf("[WiFi] AP2: '%s'\n", g_ssid2);
+  }
+
   g_wifiOK = (WiFi.status() == WL_CONNECTED);
-  Serial.print(F("[WiFi] connected: "));
-  Serial.println(WiFi.localIP());
+  Serial.printf("[WiFi] connected → %s  IP=%s\n",
+                WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
 }
 
 // =============================================================================
