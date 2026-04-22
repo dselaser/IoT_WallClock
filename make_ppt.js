@@ -38,15 +38,15 @@ function box(s, x, y, w, h, lw) {
   });
 
   // Feature tags
-  const tags = ["시간 표시", "온습도", "날씨", "자동 밝기", "WiFi IoT"];
+  const tags = ["시간 표시", "온습도", "기상청날씨", "자동밝기", "다중AP"];
   tags.forEach((t, i) => {
     const x = 0.5 + i * 1.82;
     s.addShape(pres.shapes.RECTANGLE, { x, y: 3.5, w: 1.65, h: 0.65, fill: { color: WH }, line: { color: BK, width: 1.5 } });
     s.addText(t, { x, y: 3.5, w: 1.65, h: 0.65, fontSize: 12, bold: true, color: BK, align: "center", valign: "middle" });
   });
 
-  s.addText("Arduino .ino  ·  WiFiManager  ·  wttr.in  ·  NTP  ·  DHT11  ·  CDS  ·  date.nager.at", {
-    x: 0.5, y: 4.5, w: 9, h: 0.5, fontSize: 13, color: LG, align: "center"
+  s.addText("Arduino .ino  ·  WiFiManager  ·  ESP8266WiFiMulti  ·  apihub.kma.go.kr  ·  NTP  ·  DHT11  ·  CDS  ·  date.nager.at", {
+    x: 0.5, y: 4.5, w: 9, h: 0.5, fontSize: 11, color: LG, align: "center"
   });
 }
 
@@ -86,7 +86,7 @@ function box(s, x, y, w, h, lw) {
   s.addText([
     { text: "NTP 서버", options: { breakLine: true } },
     { text: "ip-api.com", options: { breakLine: true } },
-    { text: "wttr.in", options: { breakLine: true } },
+    { text: "apihub.kma.go.kr", options: { breakLine: true } },
     { text: "date.nager.at" }
   ], { x: 7.1, y: 2.8, w: 2.5, h: 1.5, fontSize: 12, color: BK, align: "center", valign: "middle" });
 
@@ -111,12 +111,12 @@ function box(s, x, y, w, h, lw) {
   hdr(s, "주요 기능");
 
   const feats = [
-    { n: "1", t: "WiFi 자동 설정 (Captive Portal)", d: "첫 부팅 시 'IoTClock-Setup' AP 생성\n스마트폰으로 접속 → SSID·비밀번호 입력" },
+    { n: "1", t: "WiFi 다중 AP 자동 전환", d: "Portal에서 1·2번 SSID 등록\nESP8266WiFiMulti → 신호 강한 AP 자동 접속" },
     { n: "2", t: "NTP 자동 시간 동기", d: "pool.ntp.org 접속, 한국 표준시(KST)\nUTC+9 자동 적용" },
-    { n: "3", t: "IP 기반 위치 자동 감지", d: "ip-api.com → 접속 IP로 도시명 추출\n별도 GPS·설정 불필요" },
-    { n: "4", t: "실시간 날씨 수신", d: "wttr.in HTTPS, 1분마다 갱신\nSunny·Cloud·Rain·Snow·Fog·Storm" },
-    { n: "5", t: "온습도 혼합 표시", d: "온도: wttr.in 외부 기상값 사용\n습도: DHT11 실내 센서 (2.5초 주기)" },
-    { n: "6", t: "CDS 자동 밝기 + 야간 모드", d: "CDS raw > 920 → 야간 모드: 시계만 표시 + 밝기 1\n일반: raw 350~1023 → 밝기 150~5 자동 조절" },
+    { n: "3", t: "IP 기반 위치 자동 감지", d: "ip-api.com → 도시명 + 위도/경도 취득\n격자 변환 없이 기상청 API 직접 활용" },
+    { n: "4", t: "기상청 동네 날씨 수신", d: "apihub.kma.go.kr 지상관측 API\n기온(ta)·습도(hm)·현천코드(ww) 1분 갱신" },
+    { n: "5", t: "온습도 혼합 표시", d: "온도: 기상청 지상관측 (외부 기온)\n습도: DHT11 실내 센서 (2.5초 주기)" },
+    { n: "6", t: "CDS 자동 밝기 + 야간 모드", d: "raw > 960 → 야간 모드 (시계만 + 밝기 1~4)\n일반: raw 350~960 → 밝기 150~5 비례 조절" },
     { n: "7", t: "공휴일 자동 표시", d: "date.nager.at API → 한국 공휴일 자동 취득\n토·일·공휴일 스크롤 날짜 적색 표시" },
   ];
 
@@ -134,40 +134,54 @@ function box(s, x, y, w, h, lw) {
   });
 }
 
-// ── Slide 4: WiFi Captive Portal 흐름 ─────────────────────────────────────
+// ── Slide 4: WiFi 설정 + 다중AP ─────────────────────────────────────────
 {
   const s = pres.addSlide();
-  hdr(s, "WiFi 설정 흐름 (Captive Portal)");
+  hdr(s, "WiFi 설정 흐름 (Captive Portal + 다중 AP)");
 
   const steps = [
     { t: "전원 ON", d: "AP 생성\n'IoTClock-Setup'" },
     { t: "스마트폰 연결", d: "WiFi 목록에서\nAP 선택" },
     { t: "설정 페이지", d: "브라우저 자동 팝업\n(192.168.4.1)" },
-    { t: "SSID 입력", d: "가정 WiFi\nSSID + 비밀번호" },
-    { t: "연결 완료", d: "재시작 후\n자동 접속" },
+    { t: "SSID 입력", d: "1번+2번 WiFi\nSSID·비밀번호" },
+    { t: "연결 완료", d: "WiFiMulti 등록\n강한 AP 자동 선택" },
   ];
 
-  const bw = 1.5, bh = 1.7, gap = 1.85, sy = 1.7;
+  const bw = 1.5, bh = 1.5, gap = 1.85, sy = 1.3;
   steps.forEach((st, i) => {
     const x = 0.35 + i * gap;
     s.addShape(pres.shapes.OVAL, { x, y: sy, w: bw, h: bh, fill: { color: WH }, line: { color: BK, width: 2 } });
-    s.addText(`${i + 1}`, { x, y: sy + 0.1, w: bw, h: 0.45, fontSize: 20, bold: true, color: BK, align: "center" });
-    s.addText(st.t, { x, y: sy + 0.5, w: bw, h: 0.45, fontSize: 12, bold: true, color: BK, align: "center" });
-    s.addText(st.d, { x, y: sy + 0.95, w: bw, h: 0.65, fontSize: 10, color: GY, align: "center" });
+    s.addText(`${i + 1}`, { x, y: sy + 0.08, w: bw, h: 0.4, fontSize: 20, bold: true, color: BK, align: "center" });
+    s.addText(st.t, { x, y: sy + 0.42, w: bw, h: 0.4, fontSize: 12, bold: true, color: BK, align: "center" });
+    s.addText(st.d, { x, y: sy + 0.82, w: bw, h: 0.58, fontSize: 10, color: GY, align: "center" });
     if (i < steps.length - 1) line(s, x + bw, sy + bh / 2, x + gap, sy + bh / 2, 1.5);
   });
 
-  box(s, 0.5, 3.75, 9.0, 0.75, 1);
-  s.addText([
-    { text: "3분 안에 설정 없으면 자동 재시작  |  ", options: {} },
-    { text: "이미 저장된 SSID 있으면 자동 연결  |  ", options: {} },
-    { text: "연결 실패 시 'WiFi ?' 적색 1Hz 깜빡임" }
-  ], { x: 0.7, y: 3.82, w: 8.6, h: 0.6, fontSize: 12, color: GY, valign: "middle" });
+  // WiFiMulti 동작 설명
+  box(s, 0.4, 3.1, 9.2, 1.0, 1.5);
+  s.addShape(pres.shapes.RECTANGLE, { x: 0.4, y: 3.1, w: 9.2, h: 0.38, fill: { color: DK }, line: { color: BK, width: 0 } });
+  s.addText("ESP8266WiFiMulti  자동 전환 동작", { x: 0.4, y: 3.1, w: 9.2, h: 0.38, fontSize: 13, bold: true, color: WH, align: "center", valign: "middle" });
 
-  // WiFi ? display mock
-  box(s, 2.5, 4.65, 5.0, 0.75, 2);
-  s.addText("LED 표시 →  WiFi ?  (적색 1Hz 깜빡임)", {
-    x: 2.5, y: 4.65, w: 5.0, h: 0.75, fontSize: 13, color: BK, align: "center", valign: "middle"
+  const multis = [
+    { c: "AP1 신호 강함", a: "1번 AP 유지 접속" },
+    { c: "AP1 신호 약화 / 끊김", a: "5초 이내 재스캔 → 신호 강한 AP 자동 전환" },
+    { c: "2번 AP 미입력", a: "1번 AP만으로 정상 동작  (하위 호환)" },
+  ];
+  multis.forEach((m, i) => {
+    const my = 3.52 + i * 0.2;
+    s.addText("▶ " + m.c, { x: 0.6, y: my, w: 3.0, h: 0.2, fontSize: 11, bold: true, color: BK });
+    s.addText("→  " + m.a, { x: 3.6, y: my, w: 5.8, h: 0.2, fontSize: 11, color: DK });
+  });
+
+  // 2번 AP EEPROM 저장 안내
+  box(s, 0.4, 4.25, 9.2, 0.55, 1);
+  s.addText("2번째 AP 정보는 EEPROM에 저장  |  전원 재시작 후에도 유지  |  Portal 재접속으로 변경 가능", {
+    x: 0.6, y: 4.32, w: 8.8, h: 0.4, fontSize: 11.5, color: GY, valign: "middle"
+  });
+
+  box(s, 0.4, 4.9, 9.2, 0.5, 1.5);
+  s.addText("LED 표시 →  WiFi ?  (적색 1Hz 깜빡임)   ←  WiFi 미접속 시", {
+    x: 0.4, y: 4.9, w: 9.2, h: 0.5, fontSize: 13, color: BK, align: "center", valign: "middle"
   });
 }
 
@@ -209,8 +223,8 @@ function box(s, x, y, w, h, lw) {
 
   const items = [
     { n: "①", t: "날짜 (녹색/적색)", ex: "평일→녹색  /  토·일·공휴일→적색" },
-    { n: "②", t: "온도+습도 (노랑)", ex: "22C  49%  (외부온도+실내습도)" },
-    { n: "③", t: "날씨 (노랑/비=적색)", ex: "Cloud  Warm" },
+    { n: "②", t: "온도+습도 (노랑)", ex: "22C  49%  (외부기온+실내습도)" },
+    { n: "③", t: "날씨 (노랑/비=적색)", ex: "Cloud  Sunny  Rain" },
     { n: "④", t: "날씨 아이콘 8×8", ex: "태양·구름·비·눈·안개·폭풍" },
   ];
   items.forEach((it, i) => {
@@ -236,16 +250,16 @@ function box(s, x, y, w, h, lw) {
   // Sub tasks
   const tasks = [
     { l: "drawFrame()", d: "50 ms\n화면 갱신 (20fps)", x: 0.3 },
-    { l: "readDHT()", d: "2.5 s\n온습도", x: 2.2 },
-    { l: "updateBrightness()", d: "500 ms\nCDS 밝기", x: 4.0 },
-    { l: "fetchWeather()", d: "1 분\n날씨 수신", x: 6.2 },
-    { l: "WiFi 체크", d: "5 s\n연결 감시", x: 8.2 },
+    { l: "readDHT()", d: "2.5 s\n실내 습도", x: 2.2 },
+    { l: "updateBrightness()", d: "500 ms\nCDS 비례밝기", x: 4.0 },
+    { l: "fetchWeatherKMA()", d: "1 분\n기상청 날씨", x: 6.0 },
+    { l: "WiFi 체크", d: "5 s\nWiFiMulti\n재접속", x: 8.1 },
   ];
 
   tasks.forEach(t => {
     s.addShape(pres.shapes.LINE, { x: t.x + 0.9, y: 1.85, w: 0, h: 0.4, line: { color: BK, width: 1.2 } });
     box(s, t.x, 2.25, 1.8, 1.1, 1.5);
-    s.addText(t.l, { x: t.x + 0.05, y: 2.28, w: 1.7, h: 0.45, fontSize: 9.5, bold: true, color: BK, align: "center" });
+    s.addText(t.l, { x: t.x + 0.05, y: 2.28, w: 1.7, h: 0.45, fontSize: 9, bold: true, color: BK, align: "center" });
     s.addText(t.d, { x: t.x + 0.05, y: 2.73, w: 1.7, h: 0.6, fontSize: 10, color: GY, align: "center" });
   });
 
@@ -256,9 +270,9 @@ function box(s, x, y, w, h, lw) {
 
   const flows = [
     { c: "WiFi 미접속?", a: "'WiFi ?' 적색 1Hz 깜빡임 → return" },
-    { c: "야간 모드?", a: "CDS raw > 920 → 시계만 표시 + 밝기 1 (스크롤 생략)" },
+    { c: "야간 모드?", a: "CDS raw > 960 → 시계만 + 밝기 1~4 비례 (스크롤 생략)" },
     { c: "phase < 15s?", a: "시계 표시  HH:MM  (커스텀 폰트, 콜론 4점 회전)" },
-    { c: "phase >= 15s?", a: "날짜→온도+습도→날씨+아이콘 통합 스크롤" },
+    { c: "phase >= 15s?", a: "날짜→기온+습도→날씨+아이콘 통합 스크롤" },
     { c: "스크롤 완료?", a: "즉시 시계로 전환 (scrollDone 플래그)" },
   ];
   flows.forEach((f, i) => {
@@ -268,40 +282,54 @@ function box(s, x, y, w, h, lw) {
   });
 }
 
-// ── Slide 7: 날씨 수신 경로 ───────────────────────────────────────────────
+// ── Slide 7: 날씨 수신 경로 (기상청 API Hub) ──────────────────────────────
 {
   const s = pres.addSlide();
-  hdr(s, "날씨 정보 수신 경로");
+  hdr(s, "날씨 정보 수신 경로  (기상청 API Hub)");
 
   const nodes = [
     { l: "ESP8266", s: "전원 ON\n인터넷 접속", x: 0.3 },
-    { l: "ip-api.com", s: "IP → 도시명\n(Seoul)", x: 2.35 },
-    { l: "wttr.in", s: "도시 날씨 조회\n(HTTPS)", x: 4.4 },
-    { l: "텍스트 파싱", s: "Sunny/Cloud\n/Rain/Snow...", x: 6.45 },
+    { l: "ip-api.com", s: "IP → 도시명\n위도 / 경도", x: 2.35 },
+    { l: "apihub.kma\n.go.kr", s: "ta / hm / ww\n(순차 3회)", x: 4.4 },
+    { l: "ww 코드 변환", s: "WMO 코드\n→ 조건 문자열", x: 6.45 },
     { l: "LED 표시", s: "텍스트 + 아이콘\n스크롤", x: 8.5 },
   ];
 
   const bw = 1.8, bh = 1.5, ny = 1.6;
   nodes.forEach((n, i) => {
     box(s, n.x, ny, bw, bh, 2);
-    s.addText(n.l, { x: n.x, y: ny + 0.1, w: bw, h: 0.5, fontSize: 13, bold: true, color: BK, align: "center" });
-    s.addText(n.s, { x: n.x, y: ny + 0.6, w: bw, h: 0.85, fontSize: 11, color: GY, align: "center" });
+    s.addText(n.l, { x: n.x, y: ny + 0.1, w: bw, h: 0.55, fontSize: 12, bold: true, color: BK, align: "center", valign: "middle" });
+    s.addText(n.s, { x: n.x, y: ny + 0.65, w: bw, h: 0.8, fontSize: 11, color: GY, align: "center" });
     if (i < nodes.length - 1) line(s, n.x + bw, ny + bh / 2, n.x + bw + 0.55, ny + bh / 2, 1.5);
+  });
+
+  // ww 코드 매핑 표
+  const wwRows = [
+    "ww 0~2  : Sunny (맑음)",
+    "ww 3~9  : Cloud (구름)",
+    "ww 40~49: Fog   (안개)",
+    "ww 50~69: Rain  (비)",
+    "ww 70~79: Snow  (눈)",
+    "ww 95~99: Storm (뇌우)",
+  ];
+  box(s, 6.45, ny + bh + 0.2, bw, 1.55, 1);
+  wwRows.forEach((r, i) => {
+    s.addText(r, { x: 6.55, y: ny + bh + 0.28 + i * 0.24, w: 1.6, h: 0.22, fontSize: 9, color: DK, fontFace: "Consolas" });
   });
 
   // Tech details
   const techs = [
-    { t: "HTTPS 보안", d: "WiFiClientSecure + setInsecure()\nBearSSL 버퍼 512 bytes" },
-    { t: "응답 포맷", d: "wttr.in ?format=%C/%t/%h\n예) Partly cloudy/+22°C/55%" },
-    { t: "갱신 주기", d: "1분 (WEATHER_INTERVAL_MS)\n10분으로 원복 가능" },
-    { t: "오류 처리", d: "HTTP 실패 시 이전 값 유지\n'---' 으로 표시" },
+    { t: "HTTPS 보안", d: "WiFiClientSecure + setInsecure()\nBearSSL RX 1024 / TX 512 bytes" },
+    { t: "관측 요소", d: "ta: 기온(°C)\nhm: 습도(%)\nww: 현천코드(WMO)" },
+    { t: "갱신 주기", d: "1분 (3회 순차 요청)\n결측(-9999) 시 이전값 유지" },
+    { t: "위치 정밀도", d: "IP → 위도/경도 직접 활용\n기상청 격자 변환 불필요" },
   ];
   techs.forEach((t, i) => {
     const tx = 0.4 + i * 2.4;
-    box(s, tx, 3.5, 2.2, 1.85, 1.5);
+    box(s, tx, 3.5, 2.2, 1.9, 1.5);
     s.addShape(pres.shapes.RECTANGLE, { x: tx, y: 3.5, w: 2.2, h: 0.4, fill: { color: DK }, line: { color: BK, width: 0 } });
     s.addText(t.t, { x: tx, y: 3.5, w: 2.2, h: 0.4, fontSize: 12, bold: true, color: WH, align: "center", valign: "middle" });
-    s.addText(t.d, { x: tx + 0.1, y: 3.95, w: 2.0, h: 1.35, fontSize: 11, color: DK });
+    s.addText(t.d, { x: tx + 0.1, y: 3.95, w: 2.0, h: 1.4, fontSize: 11, color: DK });
   });
 }
 
