@@ -1013,7 +1013,7 @@ void drawScrollInfo(const struct tm* lt) {
   char prefix[24];
   if (g_w.valid) {
     int humi = isnan(g_humi) ? g_w.humiPct : (int)g_humi;  // DHT 실패 시 wttr.in 습도 fallback
-    snprintf(prefix, sizeof(prefix), "%d'C %d%%  ", g_w.tempC, humi);
+    snprintf(prefix, sizeof(prefix), "%d\260C %d%%  ", g_w.tempC, humi);  // \260=0xB0=°
   } else {
     snprintf(prefix, sizeof(prefix), "-- --  ");
   }
