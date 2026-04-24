@@ -38,14 +38,14 @@ function box(s, x, y, w, h, lw) {
   });
 
   // Feature tags
-  const tags = ["시간 표시", "온습도", "기상청날씨", "자동밝기", "다중AP"];
+  const tags = ["시간 표시", "온습도", "wttr.in날씨", "자동밝기", "다중AP"];
   tags.forEach((t, i) => {
     const x = 0.5 + i * 1.82;
     s.addShape(pres.shapes.RECTANGLE, { x, y: 3.5, w: 1.65, h: 0.65, fill: { color: WH }, line: { color: BK, width: 1.5 } });
     s.addText(t, { x, y: 3.5, w: 1.65, h: 0.65, fontSize: 12, bold: true, color: BK, align: "center", valign: "middle" });
   });
 
-  s.addText("Arduino .ino  ·  WiFiManager  ·  ESP8266WiFiMulti  ·  apihub.kma.go.kr  ·  NTP  ·  DHT11  ·  CDS  ·  date.nager.at", {
+  s.addText("Arduino .ino  ·  WiFiManager  ·  ESP8266WiFiMulti  ·  wttr.in  ·  NTP  ·  DHT11  ·  CDS  ·  date.nager.at", {
     x: 0.5, y: 4.5, w: 9, h: 0.5, fontSize: 11, color: LG, align: "center"
   });
 }
@@ -86,7 +86,7 @@ function box(s, x, y, w, h, lw) {
   s.addText([
     { text: "NTP 서버", options: { breakLine: true } },
     { text: "ip-api.com", options: { breakLine: true } },
-    { text: "apihub.kma.go.kr", options: { breakLine: true } },
+    { text: "wttr.in", options: { breakLine: true } },
     { text: "date.nager.at" }
   ], { x: 7.1, y: 2.8, w: 2.5, h: 1.5, fontSize: 12, color: BK, align: "center", valign: "middle" });
 
@@ -114,8 +114,8 @@ function box(s, x, y, w, h, lw) {
     { n: "1", t: "WiFi 다중 AP 자동 전환", d: "Portal에서 1·2번 SSID 등록\nESP8266WiFiMulti → 신호 강한 AP 자동 접속" },
     { n: "2", t: "NTP 자동 시간 동기", d: "pool.ntp.org 접속, 한국 표준시(KST)\nUTC+9 자동 적용" },
     { n: "3", t: "IP 기반 위치 자동 감지", d: "ip-api.com → 도시명 + 위도/경도 취득\n격자 변환 없이 기상청 API 직접 활용" },
-    { n: "4", t: "기상청 동네 날씨 수신", d: "apihub.kma.go.kr 지상관측 API\n기온(ta)·습도(hm)·현천코드(ww) 1분 갱신" },
-    { n: "5", t: "온습도 혼합 표시", d: "온도: 기상청 지상관측 (외부 기온)\n습도: DHT11 실내 센서 (2.5초 주기)" },
+    { n: "4", t: "외부 날씨 수신 (wttr.in HTTPS)", d: "fetchWeatherWttr() — 실패시 60초/성공시 5분\n텍스트 포맷 (%t|%C) → 기온+날씨조건" },
+    { n: "5", t: "온습도 혼합 표시", d: "온도: wttr.in 외부 기온 (1~5분 갱신)\n습도: DHT11 실내 센서 (2.5초 주기)" },
     { n: "6", t: "CDS 자동 밝기 + 야간 모드", d: "raw > 960 → 야간 모드 (시계만 + 밝기 1~4)\n일반: raw 350~960 → 밝기 150~5 비례 조절" },
     { n: "7", t: "공휴일 자동 표시", d: "date.nager.at API → 한국 공휴일 자동 취득\n토·일·공휴일 스크롤 날짜 적색 표시" },
   ];
@@ -247,26 +247,36 @@ function box(s, x, y, w, h, lw) {
   // Horizontal bus
   s.addShape(pres.shapes.LINE, { x: 0.9, y: 1.85, w: 8.2, h: 0, line: { color: BK, width: 1.5 } });
 
-  // Sub tasks
+  // Sub tasks — 6개를 10인치 슬라이드에 균등 배치 (박스폭 1.45, 간격 0.18)
   const tasks = [
-    { l: "drawFrame()", d: "50 ms\n화면 갱신 (20fps)", x: 0.3 },
-    { l: "readDHT()", d: "2.5 s\n실내 습도", x: 2.2 },
-    { l: "updateBrightness()", d: "500 ms\nCDS 비례밝기", x: 4.0 },
-    { l: "fetchWeatherKMA()", d: "1 분\n기상청 날씨", x: 6.0 },
-    { l: "WiFi 체크", d: "5 s\nWiFiMulti\n재접속", x: 8.1 },
+    { l: "drawFrame()", d: "50 ms\n화면 갱신 (20fps)", x: 0.2 },
+    { l: "readDHT()", d: "2.5 s\n실내 습도", x: 1.85 },
+    { l: "updateBrightness()", d: "500 ms\nCDS 비례밝기", x: 3.5 },
+    { l: "fetchWeatherWttr()", d: "1~5 분\n기온+날씨", x: 5.15 },
+    { l: "fetchHolidays()", d: "1 시간\n공휴일 갱신", x: 6.8 },
+    { l: "WiFi 체크", d: "5 s\nWiFiMulti\n재접속", x: 8.45 },
   ];
 
+  const TW = 1.45; // 태스크 박스 폭
   tasks.forEach(t => {
-    s.addShape(pres.shapes.LINE, { x: t.x + 0.9, y: 1.85, w: 0, h: 0.4, line: { color: BK, width: 1.2 } });
-    box(s, t.x, 2.25, 1.8, 1.1, 1.5);
-    s.addText(t.l, { x: t.x + 0.05, y: 2.28, w: 1.7, h: 0.45, fontSize: 9, bold: true, color: BK, align: "center" });
-    s.addText(t.d, { x: t.x + 0.05, y: 2.73, w: 1.7, h: 0.6, fontSize: 10, color: GY, align: "center" });
+    s.addShape(pres.shapes.LINE, { x: t.x + TW / 2, y: 1.85, w: 0, h: 0.4, line: { color: BK, width: 1.2 } });
+    box(s, t.x, 2.25, TW, 1.1, 1.5);
+    s.addText(t.l, { x: t.x + 0.04, y: 2.28, w: TW - 0.08, h: 0.45, fontSize: 8.5, bold: true, color: BK, align: "center" });
+    s.addText(t.d, { x: t.x + 0.04, y: 2.73, w: TW - 0.08, h: 0.6, fontSize: 9.5, color: GY, align: "center" });
+  });
+
+  // 비블로킹 날씨 갱신 설명 배너
+  box(s, 0.3, 3.45, 9.4, 0.5, 1);
+  s.addShape(pres.shapes.RECTANGLE, { x: 0.3, y: 3.45, w: 2.8, h: 0.5, fill: { color: DK }, line: { color: BK, width: 0 } });
+  s.addText("날씨 갱신 전략", { x: 0.3, y: 3.45, w: 2.8, h: 0.5, fontSize: 12, bold: true, color: WH, align: "center", valign: "middle" });
+  s.addText("fetchWeatherWttr() — wValid=false 60초 재시도 / wValid=true 5분 정기 갱신  |  wttr.in HTTPS + 텍스트 포맷 (?format=%t|%C)  |  온도=wttr.in / 습도=DHT11 실내 센서", {
+    x: 3.2, y: 3.47, w: 6.3, h: 0.45, fontSize: 10, color: DK, valign: "middle"
   });
 
   // drawFrame internals
-  box(s, 0.3, 3.6, 9.4, 1.75, 2);
-  s.addShape(pres.shapes.RECTANGLE, { x: 0.3, y: 3.6, w: 9.4, h: 0.42, fill: { color: DK }, line: { color: BK, width: 0 } });
-  s.addText("drawFrame()  내부 분기 흐름", { x: 0.3, y: 3.6, w: 9.4, h: 0.42, fontSize: 13, bold: true, color: WH, align: "center", valign: "middle" });
+  box(s, 0.3, 4.05, 9.4, 1.5, 2);
+  s.addShape(pres.shapes.RECTANGLE, { x: 0.3, y: 4.05, w: 9.4, h: 0.38, fill: { color: DK }, line: { color: BK, width: 0 } });
+  s.addText("drawFrame()  내부 분기 흐름", { x: 0.3, y: 4.05, w: 9.4, h: 0.38, fontSize: 12, bold: true, color: WH, align: "center", valign: "middle" });
 
   const flows = [
     { c: "WiFi 미접속?", a: "'WiFi ?' 적색 1Hz 깜빡임 → return" },
@@ -276,22 +286,22 @@ function box(s, x, y, w, h, lw) {
     { c: "스크롤 완료?", a: "즉시 시계로 전환 (scrollDone 플래그)" },
   ];
   flows.forEach((f, i) => {
-    const fy = 4.05 + i * 0.29;
-    s.addText("▶ " + f.c, { x: 0.5, y: fy, w: 2.6, h: 0.3, fontSize: 11, bold: true, color: BK });
-    s.addText("→  " + f.a, { x: 3.1, y: fy, w: 6.4, h: 0.3, fontSize: 11, color: DK });
+    const fy = 4.47 + i * 0.22;
+    s.addText("▶ " + f.c, { x: 0.5, y: fy, w: 2.6, h: 0.24, fontSize: 10.5, bold: true, color: BK });
+    s.addText("→  " + f.a, { x: 3.1, y: fy, w: 6.4, h: 0.24, fontSize: 10.5, color: DK });
   });
 }
 
-// ── Slide 7: 날씨 수신 경로 (기상청 API Hub) ──────────────────────────────
+// ── Slide 7: 날씨 수신 경로 (wttr.in) ────────────────────────────────────
 {
   const s = pres.addSlide();
-  hdr(s, "날씨 정보 수신 경로  (기상청 API Hub)");
+  hdr(s, "날씨 정보 수신 경로  (wttr.in)");
 
   const nodes = [
     { l: "ESP8266", s: "전원 ON\n인터넷 접속", x: 0.3 },
-    { l: "ip-api.com", s: "IP → 도시명\n위도 / 경도", x: 2.35 },
-    { l: "apihub.kma\n.go.kr", s: "ta / hm / ww\n(순차 3회)", x: 4.4 },
-    { l: "ww 코드 변환", s: "WMO 코드\n→ 조건 문자열", x: 6.45 },
+    { l: "ip-api.com", s: "IP → 도시명\n(Seoul 등)", x: 2.35 },
+    { l: "wttr.in\n(HTTPS)", s: "기온 + 날씨 설명\n텍스트 포맷", x: 4.4 },
+    { l: "descToCondition()", s: "영문 설명\n→ 조건 매핑", x: 6.45 },
     { l: "LED 표시", s: "텍스트 + 아이콘\n스크롤", x: 8.5 },
   ];
 
@@ -303,26 +313,26 @@ function box(s, x, y, w, h, lw) {
     if (i < nodes.length - 1) line(s, n.x + bw, ny + bh / 2, n.x + bw + 0.55, ny + bh / 2, 1.5);
   });
 
-  // ww 코드 매핑 표
-  const wwRows = [
-    "ww 0~2  : Sunny (맑음)",
-    "ww 3~9  : Cloud (구름)",
-    "ww 40~49: Fog   (안개)",
-    "ww 50~69: Rain  (비)",
-    "ww 70~79: Snow  (눈)",
-    "ww 95~99: Storm (뇌우)",
+  // 조건 매핑 표
+  const condRows = [
+    "partly cloudy  → PCloud",
+    "rain/drizzle   → Rain",
+    "snow/sleet     → Snow",
+    "fog/mist/haze  → Fog",
+    "thunder/storm  → Storm",
+    "sunny/clear    → Sunny",
   ];
   box(s, 6.45, ny + bh + 0.2, bw, 1.55, 1);
-  wwRows.forEach((r, i) => {
+  condRows.forEach((r, i) => {
     s.addText(r, { x: 6.55, y: ny + bh + 0.28 + i * 0.24, w: 1.6, h: 0.22, fontSize: 9, color: DK, fontFace: "Consolas" });
   });
 
   // Tech details
   const techs = [
-    { t: "HTTPS 보안", d: "WiFiClientSecure + setInsecure()\nBearSSL RX 1024 / TX 512 bytes" },
-    { t: "관측 요소", d: "ta: 기온(°C)\nhm: 습도(%)\nww: 현천코드(WMO)" },
-    { t: "갱신 주기", d: "1분 (3회 순차 요청)\n결측(-9999) 시 이전값 유지" },
-    { t: "위치 정밀도", d: "IP → 위도/경도 직접 활용\n기상청 격자 변환 불필요" },
+    { t: "HTTPS 방식", d: "WiFiClientSecure\n+ setInsecure()\nCloudflare MFLN\n→ 4096 RX 버퍼" },
+    { t: "텍스트 포맷", d: "?format=%t|%C\n응답 ~30 bytes\n→ split '|'\nJSON 파싱 없음" },
+    { t: "갱신 전략", d: "wValid=false:\n60초 재시도\nwValid=true:\n5분 정기 갱신" },
+    { t: "온습도 분리", d: "온도:\nwttr.in 외부값\n습도:\nDHT11 실내 센서" },
   ];
   techs.forEach((t, i) => {
     const tx = 0.4 + i * 2.4;
