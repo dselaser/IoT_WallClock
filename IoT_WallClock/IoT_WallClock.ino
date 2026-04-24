@@ -910,9 +910,14 @@ void drawScrollInfo(const struct tm* lt) {
 }
 
 void drawWiFiQuestion() {
-  // 1 Hz on/off  (500ms on, 500ms off)
-  if ((millis() / 500) & 1) return;
+  static const char msg[] = "WiFi failed - connect phone to IoTClock-Setup   ";
+  static int sx = MATRIX_W;
+
+  // 1픽셀씩 스크롤 (drawFrame 50ms 주기에 의해 자동 호출)
+  const int msgPx = (int)(sizeof(msg) - 1) * 6;  // 6px per char (5+1)
+  if (--sx < -msgPx) sx = MATRIX_W;              // 끝까지 가면 처음으로
+
   matrix.setTextColor(C_RED);
-  matrix.setCursor(2, 0);
-  matrix.print(F("WiFi ?"));
+  matrix.setCursor(sx, 0);
+  matrix.print(msg);
 }
