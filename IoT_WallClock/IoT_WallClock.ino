@@ -554,23 +554,27 @@ void fetchCondKMA() {
 }
 
 // =============================================================================
-// wttr.in 날씨 취득 (HTTP, SSL 없음, 무료, 인증키 불필요)
-//   API: http://wttr.in/{lat},{lon}?format=j1
-//   응답: {"current_condition":[{"temp_C":"15","weatherDesc":[{"value":"Partly cloudy"}]}]}
+// wttr.in 날씨 취득 — 텍스트 포맷 사용 (JSON 파싱 없음, ArduinoJson 불필요)
+//   URL : https://wttr.in/{city}?format=%t|%C&lang=en
+//   응답: "+18°C|Partly cloudy"  (20~40 바이트, 메모리 문제 없음)
+//   JSON format=j1 의 중첩 배열 필터링이 ArduinoJson 스트리밍에서
+//   신뢰할 수 없어 텍스트 포맷으로 전환
 // =============================================================================
 void fetchWeatherWttr() {
-  char locStr[32];
-  snprintf(locStr, sizeof(locStr), "%.4f,%.4f", g_lat, g_lon);
-  Serial.printf("[WTTR] loc=%s  heap=%u\n", locStr, ESP.getFreeHeap());
+  // 도시명 URL 안전 변환 (공백 → +)
+  String loc = String(g_w.city);
+  loc.replace(" ", "+");
+  if (loc.length() == 0) loc = F("Seoul");
 
-  // wttr.in HTTP → HTTPS 리다이렉트 발생 → WiFiClientSecure 필요
-  // Cloudflare CDN 이므로 MFLN(RFC6066) 지원 → 4096 버퍼로 동작 가능
+  Serial.printf("[WTTR] loc=%s  heap=%u\n", loc.c_str(), ESP.getFreeHeap());
+
   WiFiClientSecure client;
   client.setInsecure();
-  client.setBufferSizes(4096, 1024);
+  client.setBufferSizes(4096, 1024);   // Cloudflare MFLN 지원
 
   HTTPClient http;
-  String url = String("https://wttr.in/") + locStr + "?format=j1";
+  // %t = 온도(+18°C), %C = 날씨 설명, | = 구분자, lang=en 영문 강제
+  String url = String("https://wttr.in/") + loc + "?format=%t|%C&lang=en";
   Serial.printf("[WTTR] %s\n", url.c_str());
 
   if (!http.begin(client, url)) {
@@ -583,32 +587,42 @@ void fetchWeatherWttr() {
   int code = http.GET();
   Serial.printf("[WTTR] http=%d\n", code);
   if (code == 200) {
-    // 필터 doc: 중첩 구조가 크므로 256 바이트 (128 이하면 오버플로 → 필드 누락)
-    StaticJsonDocument<256> filter;
-    filter["current_condition"][0]["temp_C"]                    = true;
-    filter["current_condition"][0]["weatherDesc"][0]["value"]   = true;
-    DynamicJsonDocument doc(512);
-    DeserializationError err = deserializeJson(doc, http.getStream(),
-                                               DeserializationOption::Filter(filter));
-    if (!err) {
-      const char* tStr = doc["current_condition"][0]["temp_C"] | "999";
-      const char* desc = doc["current_condition"][0]["weatherDesc"][0]["value"] | "";
-      Serial.printf("[WTTR] raw: temp_C=%s  desc=%s\n", tStr, desc);
-      if (tStr[0] != '9' || tStr[1] != '9' || tStr[2] != '9') {
-        g_w.tempC = atoi(tStr);
-        strlcpy(g_w.condition, descToCondition(String(desc)), sizeof(g_w.condition));
-        g_w.valid = true;
-        Serial.printf("[WTTR] OK  %s  %d'C  %s\n", g_w.city, g_w.tempC, g_w.condition);
-      } else {
-        Serial.println(F("[WTTR] temp_C missing — 필터 확인 필요"));
+    String body = http.getString();   // 응답 < 50 bytes → 힙 부담 없음
+    http.end();
+    client.stop();
+    body.trim();
+    Serial.printf("[WTTR] raw: '%s'\n", body.c_str());
+
+    // "|" 구분자로 온도 / 날씨 분리
+    int sep = body.indexOf('|');
+    if (sep > 0) {
+      String tempStr = body.substring(0, sep);   // "+18°C"
+      String condStr = body.substring(sep + 1);  // "Partly cloudy"
+      condStr.trim();
+
+      // 온도 정수 추출: +18°C → 18, -5°C → -5
+      int tval = 0;
+      bool neg = false;
+      for (int i = 0; i < (int)tempStr.length(); i++) {
+        char c = tempStr.charAt(i);
+        if      (c == '-')               neg = true;
+        else if (isdigit((unsigned char)c)) tval = tval * 10 + (c - '0');
+        else if (tval > 0)               break;  // 숫자 끝 (°C 이후)
       }
+      if (neg) tval = -tval;
+
+      g_w.tempC = tval;
+      strlcpy(g_w.condition, descToCondition(condStr), sizeof(g_w.condition));
+      g_w.valid = true;
+      Serial.printf("[WTTR] OK  %s  %d'C  %s\n", g_w.city, g_w.tempC, g_w.condition);
     } else {
-      Serial.printf("[WTTR] parse err: %s\n", err.c_str());
+      Serial.printf("[WTTR] parse FAIL (no '|'): '%s'\n", body.c_str());
     }
+    return;
   }
   http.end();
   client.stop();
-  delay(200);   // SSL 세션 해제 대기
+  delay(200);
 }
 
 // =============================================================================
