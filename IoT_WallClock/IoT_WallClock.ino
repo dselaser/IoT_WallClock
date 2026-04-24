@@ -50,10 +50,12 @@
 #define DST_OFFSET_SEC  0
 
 #define WEATHER_INTERVAL_MS   60000UL     // 1분
+#define NTP_INTERVAL_MS       30000UL     // 30초 NTP 재동기
 #define DHT_INTERVAL_MS       2500UL
 #define CDS_INTERVAL_MS       500UL
 #define WIFI_CHECK_INTERVAL   5000UL
 #define FRAME_INTERVAL_MS     50UL
+#define RSSI_THRESHOLD        (-75)       // dBm, 이 이하면 더 좋은 AP 탐색
 
 // CDS raw 값이 이 이상이면 야간 모드 (주위 조명 꺼진 상태 → 시계만 표시)
 #define CDS_NIGHT_THRESHOLD   960
@@ -109,10 +111,12 @@ uint8_t  g_holCount    = 0;
 int      g_holYear     = 0;      // 0 = 미취득
 
 unsigned long tWeather = 0;
+unsigned long tNTP     = 0;
 unsigned long tDHT     = 0;
 unsigned long tCDS     = 0;
 unsigned long tWiFi    = 0;
 unsigned long tFrame   = 0;
+bool     g_ntpSynced   = false;   // NTP 최소 1회 동기 완료 플래그
 
 int      scrollX       = MATRIX_W;   // 통합 스크롤
 bool     scrollDone    = false;       // 스크롤 완료 플래그
@@ -184,15 +188,37 @@ void loop() {
   if (now - tWiFi >= WIFI_CHECK_INTERVAL) {
     tWiFi = now;
     if (WiFi.status() == WL_CONNECTED) {
-      g_wifiOK = true;
-    } else {
-      // 연결 끊김 → WiFiMulti로 재스캔 (신호 강한 AP 자동 선택)
-      Serial.println(F("[WiFi] disconnected, scanning..."));
-      g_wifiOK = (g_wifiMulti.run(8000) == WL_CONNECTED);
-      if (g_wifiOK) {
-        Serial.printf("[WiFi] reconnected → %s\n", WiFi.SSID().c_str());
+      int rssi = WiFi.RSSI();
+      if (rssi < RSSI_THRESHOLD) {
+        // 신호 약함 → WiFiMulti로 더 좋은 AP 탐색
+        Serial.printf("[WiFi] RSSI=%d dBm weak → 더 좋은 AP 탐색\n", rssi);
+        g_wifiOK = (g_wifiMulti.run(5000) == WL_CONNECTED);
+        if (g_wifiOK)
+          Serial.printf("[WiFi] AP 전환 → %s  RSSI=%d\n", WiFi.SSID().c_str(), WiFi.RSSI());
+      } else {
+        g_wifiOK = true;
       }
+    } else {
+      // 연결 끊김 → WiFiMulti 재스캔
+      Serial.println(F("[WiFi] 끊김 → 재스캔"));
+      g_wifiOK = (g_wifiMulti.run(8000) == WL_CONNECTED);
+      if (g_wifiOK)
+        Serial.printf("[WiFi] 재접속 → %s\n", WiFi.SSID().c_str());
+      else
+        Serial.println(F("[WiFi] 재접속 실패 → 내부 클록으로 시간 표시"));
     }
+  }
+
+  // NTP 30초 주기 동기 (WiFi 연결 시)
+  if (g_wifiOK && (now - tNTP >= NTP_INTERVAL_MS)) {
+    tNTP = now;
+    configTime(TZ_OFFSET_SEC, DST_OFFSET_SEC,
+               "pool.ntp.org", "time.google.com", "kr.pool.ntp.org");
+  }
+  // NTP 첫 동기 감지 (2020-01-01 이후면 유효)
+  if (!g_ntpSynced && time(nullptr) > 1577836800UL) {
+    g_ntpSynced = true;
+    Serial.println(F("[NTP] 첫 동기 완료 — 이후 WiFi 없어도 내부 클록 사용"));
   }
 
   if (now - tDHT >= DHT_INTERVAL_MS) {
@@ -678,7 +704,9 @@ void updateBrightness() {
 void drawFrame() {
   matrix.fillScreen(0);
 
-  if (!g_wifiOK) {
+  // WiFi 없고 NTP 동기도 안 된 경우 → "WiFi ?" 표시
+  // NTP 동기 완료 후에는 WiFi 없어도 내부 클록으로 정상 표시
+  if (!g_wifiOK && !g_ntpSynced) {
     drawWiFiQuestion();
     matrix.show();
     return;
