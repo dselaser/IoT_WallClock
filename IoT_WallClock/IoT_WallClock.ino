@@ -49,7 +49,8 @@
 #define TZ_OFFSET_SEC   (9 * 3600)   // KST
 #define DST_OFFSET_SEC  0
 
-#define WEATHER_INTERVAL_MS   60000UL     // 1분
+#define WEATHER_INTERVAL_MS   60000UL     // 1분 (기온 ta)
+#define WEATHER_WW_INTERVAL   300000UL    // 5분 (날씨코드 ww)
 #define NTP_INTERVAL_MS       30000UL     // 30초 NTP 재동기
 #define DHT_INTERVAL_MS       2500UL
 #define CDS_INTERVAL_MS       500UL
@@ -110,7 +111,9 @@ HoliDay  g_hols[30];
 uint8_t  g_holCount    = 0;
 int      g_holYear     = 0;      // 0 = 미취득
 
-unsigned long tWeather = 0;
+unsigned long tWeather   = 0;
+unsigned long tWeatherWW = 0;
+unsigned long tHoliday   = 0;   // 공휴일 체크 타이머 (매 루프 실행 방지)
 unsigned long tNTP     = 0;
 unsigned long tDHT     = 0;
 unsigned long tCDS     = 0;
@@ -126,7 +129,9 @@ void loadAP2();
 void saveAP2();
 void connectWiFi();
 void fetchCityByIP();
-void fetchWeatherKMA();
+void fetchWeatherWttr();        // wttr.in HTTP (SSL 불필요, 무료)
+void fetchTempKMA();            // 기상청 KMA (auth key 있을 때 사용 가능)
+void fetchCondKMA();
 float fetchKMAObs(const char* obs, const char* stm1, const char* stm2);
 float parseKMAValue(const String& body);
 const char* wwToCondition(int ww);
@@ -145,6 +150,26 @@ void drawScrollInfo(const struct tm* lt);
 void drawWiFiQuestion();
 
 // =============================================================================
+// BOOT 화면 — "BOOT" + 오른쪽 황색 2×2 점 토글 (살아있음 표시)
+// =============================================================================
+static bool s_bootDot = false;
+void showBoot() {
+  s_bootDot = !s_bootDot;
+  matrix.fillScreen(0);
+  matrix.setTextColor(C_CYAN);
+  matrix.setCursor(2, 0);
+  matrix.print(F("BOOT"));
+  if (s_bootDot) {
+    // "BOOT" 끝(x≈26) 오른쪽에 2×2 황색 점
+    matrix.drawPixel(28, 3, C_YELLOW);
+    matrix.drawPixel(29, 3, C_YELLOW);
+    matrix.drawPixel(28, 4, C_YELLOW);
+    matrix.drawPixel(29, 4, C_YELLOW);
+  }
+  matrix.show();
+}
+
+// =============================================================================
 // SETUP
 // =============================================================================
 void setup() {
@@ -159,13 +184,10 @@ void setup() {
   matrix.begin();
   matrix.setTextWrap(false);
   matrix.setBrightness(g_brightness);
-  matrix.setTextColor(C_CYAN);
-  matrix.fillScreen(0);
-  matrix.setCursor(2, 0);
-  matrix.print(F("BOOT"));
-  matrix.show();
+  showBoot();   // BOOT + 황색 점 ON
 
   connectWiFi();
+  showBoot();   // 점 OFF — WiFi 완료
 
   // NTP 시작 (configTime 은 내부적으로 SNTP 폴링)
   configTime(TZ_OFFSET_SEC, DST_OFFSET_SEC,
@@ -173,10 +195,28 @@ void setup() {
 
   if (g_wifiOK) {
     fetchCityByIP();
-    fetchWeatherKMA();
-    fetchHolidays();      // 한국 공휴일 취득 (date.nager.at)
+
+    // NTP 동기 대기 (최대 10초) — configTime() 직후 바로 조회하면 time()=0
+    Serial.print(F("[NTP] 동기 대기"));
+    unsigned long ntpWait = millis();
+    while (time(nullptr) < 1577836800UL && millis() - ntpWait < 10000) {
+      delay(200);
+      Serial.print('.');
+      showBoot();   // 점 토글로 살아있음 표시
+    }
+    Serial.println();
+
+    if (time(nullptr) > 1577836800UL) {
+      g_ntpSynced = true;
+      Serial.println(F("[NTP] 동기 완료 (setup)"));
+      fetchWeatherWttr();        // 기온+날씨 (wttr.in HTTP, SSL 없음)
+    } else {
+      Serial.println(F("[NTP] 타임아웃 — loop 에서 재시도"));
+    }
+    fetchHolidays();         // 한국 공휴일 취득
   }
-  tWeather = millis();
+  tWeather   = millis();
+  tWeatherWW = millis();
 }
 
 // =============================================================================
@@ -185,21 +225,14 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
+  // WiFi 상태 확인: 연결된 경우 그냥 pass, 끊긴 경우만 재스캔
+  // (RSSI 기반 능동 AP 전환 제거 → g_wifiMulti.run() 이 5초마다 블로킹하는 문제 해결)
   if (now - tWiFi >= WIFI_CHECK_INTERVAL) {
     tWiFi = now;
+    bool prevOK = g_wifiOK;
     if (WiFi.status() == WL_CONNECTED) {
-      int rssi = WiFi.RSSI();
-      if (rssi < RSSI_THRESHOLD) {
-        // 신호 약함 → WiFiMulti로 더 좋은 AP 탐색
-        Serial.printf("[WiFi] RSSI=%d dBm weak → 더 좋은 AP 탐색\n", rssi);
-        g_wifiOK = (g_wifiMulti.run(5000) == WL_CONNECTED);
-        if (g_wifiOK)
-          Serial.printf("[WiFi] AP 전환 → %s  RSSI=%d\n", WiFi.SSID().c_str(), WiFi.RSSI());
-      } else {
-        g_wifiOK = true;
-      }
+      g_wifiOK = true;
     } else {
-      // 연결 끊김 → WiFiMulti 재스캔
       Serial.println(F("[WiFi] 끊김 → 재스캔"));
       g_wifiOK = (g_wifiMulti.run(8000) == WL_CONNECTED);
       if (g_wifiOK)
@@ -207,18 +240,33 @@ void loop() {
       else
         Serial.println(F("[WiFi] 재접속 실패 → 내부 클록으로 시간 표시"));
     }
+    // WiFi 복구 시에만 NTP 재동기 요청
+    // (loop 안에서 configTime() 반복 호출 금지: SNTP 리셋으로 time()=0 이 되어 시계 멈춤 유발)
+    if (g_wifiOK && !prevOK) {
+      configTime(TZ_OFFSET_SEC, DST_OFFSET_SEC,
+                 "pool.ntp.org", "time.google.com", "kr.pool.ntp.org");
+      Serial.println(F("[NTP] WiFi 복구 → NTP 재요청"));
+    }
   }
 
-  // NTP 30초 주기 동기 (WiFi 연결 시)
-  if (g_wifiOK && (now - tNTP >= NTP_INTERVAL_MS)) {
-    tNTP = now;
-    configTime(TZ_OFFSET_SEC, DST_OFFSET_SEC,
-               "pool.ntp.org", "time.google.com", "kr.pool.ntp.org");
-  }
-  // NTP 첫 동기 감지 (2020-01-01 이후면 유효)
+  // NTP 첫 동기 감지 → 즉시 날씨 취득
   if (!g_ntpSynced && time(nullptr) > 1577836800UL) {
     g_ntpSynced = true;
-    Serial.println(F("[NTP] 첫 동기 완료 — 이후 WiFi 없어도 내부 클록 사용"));
+    Serial.println(F("[NTP] 첫 동기 완료 — 즉시 날씨 취득"));
+    if (g_wifiOK) {
+      fetchWeatherWttr();
+      tWeatherWW = millis();
+    }
+  }
+
+  // 10초마다 핵심 상태 진단 출력 (KMA 미작동 원인 추적용)
+  static unsigned long tDbg = 0;
+  if (now - tDbg >= 10000) {
+    tDbg = now;
+    Serial.printf("[STATUS] wifiOK=%d ntpSync=%d wValid=%d heap=%u  tWW=%lus/%lus\n",
+                  g_wifiOK, g_ntpSynced, g_w.valid, ESP.getFreeHeap(),
+                  (now - tWeatherWW) / 1000,
+                  (g_w.valid ? WEATHER_WW_INTERVAL : WEATHER_INTERVAL_MS) / 1000);
   }
 
   if (now - tDHT >= DHT_INTERVAL_MS) {
@@ -231,13 +279,20 @@ void loop() {
     updateBrightness();
   }
 
-  if (g_wifiOK && (now - tWeather >= WEATHER_INTERVAL_MS)) {
-    tWeather = now;
-    fetchWeatherKMA();
+  // Open-Meteo 날씨 갱신
+  //   wValid=false 동안 : 60초 재시도 (빠른 복구)
+  //   wValid=true  이후 : 5분 주기 갱신
+  {
+    unsigned long wIv = g_w.valid ? WEATHER_WW_INTERVAL : WEATHER_INTERVAL_MS;
+    if (g_wifiOK && g_ntpSynced && (now - tWeatherWW >= wIv)) {
+      tWeatherWW = now;
+      fetchWeatherWttr();
+    }
   }
 
-  // 공휴일: 연초 자동 갱신 (연도 바뀌면 재취득)
-  if (g_wifiOK) {
+  // 공휴일: 1시간 주기로 연도 변경 감지 (매 루프 실행 방지)
+  if (g_wifiOK && g_ntpSynced && (now - tHoliday >= 3600000UL)) {
+    tHoliday = now;
     time_t t = time(nullptr);
     struct tm lt2;
     localtime_r(&t, &lt2);
@@ -408,11 +463,12 @@ float parseKMAValue(const String& body) {
 //   stm2 : 종료시각 YYYYMMDDHHMM (KST)
 // =============================================================================
 float fetchKMAObs(const char* obs, const char* stm1, const char* stm2) {
-  Serial.printf("[KMA] obs=%s  heap=%u\n", obs, ESP.getFreeHeap());
+  Serial.printf("\n[KMA>>>] obs=%s  heap=%u\n", obs, ESP.getFreeHeap());
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setBufferSizes(1024, 512);
+  // 4096: KMA 정부 인증서 체인(보통 3~5KB) SSL 핸드셰이크 수용
+  client.setBufferSizes(4096, 1024);
 
   HTTPClient http;
   String url = String("https://apihub.kma.go.kr/api/typ01/cgi-bin/url/nph-sfc_obs_nc_pt_api?obs=") +
@@ -423,15 +479,21 @@ float fetchKMAObs(const char* obs, const char* stm1, const char* stm2) {
                "&lat=" + String(g_lat, 4) +
                "&authKey=" + KMA_AUTH_KEY;
 
-  if (!http.begin(client, url)) { return NAN; }
+  Serial.printf("[KMA] URL: %s\n", url.c_str());
+
+  if (!http.begin(client, url)) {
+    Serial.println(F("[KMA] http.begin FAIL"));
+    return NAN;
+  }
   http.setTimeout(15000);
   http.setUserAgent("curl/7.68");
 
   float result = NAN;
   int code = http.GET();
+  Serial.printf("[KMA/%s] http=%d\n", obs, code);
   if (code == 200) {
     String body = http.getString();
-    Serial.printf("[KMA/%s] body: %s\n", obs, body.c_str());
+    Serial.printf("[KMA/%s] body(%d): %s\n", obs, body.length(), body.c_str());
     result = parseKMAValue(body);
     Serial.printf("[KMA/%s] value=%.1f\n", obs, result);
   } else {
@@ -444,40 +506,98 @@ float fetchKMAObs(const char* obs, const char* stm1, const char* stm2) {
 }
 
 // =============================================================================
-// 기상청 날씨 취득  (기온·습도·현천코드, KMA API Hub)
+// 기상청 날씨 취득 — 기온 (ta, 1분 주기)
+//   HTTPS 요청 1회만 → 최대 8초 블로킹, 콜론 애니메이션 영향 최소화
 // =============================================================================
-void fetchWeatherKMA() {
+static void makeKMAWindow(char* stm1, char* stm2, size_t sz) {
   time_t now_t = time(nullptr);
-  if (now_t < 100000UL) {
-    Serial.println(F("[KMA] NTP not ready"));
+  struct tm lt2, lt1;
+  localtime_r(&now_t,        &lt2);
+  time_t t1 = now_t - 7200;
+  localtime_r(&t1,           &lt1);
+  strftime(stm2, sz, "%Y%m%d%H%M", &lt2);
+  strftime(stm1, sz, "%Y%m%d%H%M", &lt1);
+}
+
+void fetchTempKMA() {
+  time_t now_t = time(nullptr);
+  if (now_t < 100000UL) { Serial.println(F("[KMA] NTP not ready")); return; }
+
+  char stm1[13], stm2[13];
+  makeKMAWindow(stm1, stm2, sizeof(stm1));
+  Serial.printf("[KMA/ta] window %s ~ %s\n", stm1, stm2);
+
+  float ta = fetchKMAObs("ta", stm1, stm2);
+  if (!isnan(ta)) {
+    g_w.tempC = (int)roundf(ta);
+    g_w.valid = true;
+    Serial.printf("[KMA/ta] %s  %d'C\n", g_w.city, g_w.tempC);
+  } else {
+    Serial.println(F("[KMA/ta] missing, keep previous"));
+  }
+}
+
+// =============================================================================
+// 기상청 날씨 취득 — 날씨코드 (ww, 5분 주기)
+// =============================================================================
+void fetchCondKMA() {
+  time_t now_t = time(nullptr);
+  if (now_t < 100000UL) { Serial.println(F("[KMA] NTP not ready")); return; }
+
+  char stm1[13], stm2[13];
+  makeKMAWindow(stm1, stm2, sizeof(stm1));
+  Serial.printf("[KMA/ww] window %s ~ %s\n", stm1, stm2);
+
+  float ww = fetchKMAObs("ww", stm1, stm2);
+  strlcpy(g_w.condition, wwToCondition(isnan(ww) ? -1 : (int)ww), sizeof(g_w.condition));
+  Serial.printf("[KMA/ww] code=%d  -> %s\n", isnan(ww)?-1:(int)ww, g_w.condition);
+}
+
+// =============================================================================
+// wttr.in 날씨 취득 (HTTP, SSL 없음, 무료, 인증키 불필요)
+//   API: http://wttr.in/{lat},{lon}?format=j1
+//   응답: {"current_condition":[{"temp_C":"15","weatherDesc":[{"value":"Partly cloudy"}]}]}
+// =============================================================================
+void fetchWeatherWttr() {
+  char locStr[32];
+  snprintf(locStr, sizeof(locStr), "%.4f,%.4f", g_lat, g_lon);
+  Serial.printf("[WTTR] loc=%s  heap=%u\n", locStr, ESP.getFreeHeap());
+
+  WiFiClient client;   // HTTP — SSL 불필요
+  HTTPClient http;
+  String url = String("http://wttr.in/") + locStr + "?format=j1";
+  Serial.printf("[WTTR] %s\n", url.c_str());
+
+  if (!http.begin(client, url)) {
+    Serial.println(F("[WTTR] begin FAIL"));
     return;
   }
+  http.setTimeout(10000);
+  http.setUserAgent("curl/7.68");
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
-  // KST 시각 → tm1(2시간 전), tm2(현재)
-  char stm1[13], stm2[13];
-  struct tm lt2, lt1;
-  localtime_r(&now_t,          &lt2);
-  time_t t1 = now_t - 7200;
-  localtime_r(&t1,             &lt1);
-  strftime(stm2, sizeof(stm2), "%Y%m%d%H%M", &lt2);
-  strftime(stm1, sizeof(stm1), "%Y%m%d%H%M", &lt1);
-  Serial.printf("[KMA] window %s ~ %s  lat=%.4f lon=%.4f\n",
-                stm1, stm2, g_lat, g_lon);
-
-  float ta = fetchKMAObs("ta", stm1, stm2);   // 기온 (°C)
-  float hm = fetchKMAObs("hm", stm1, stm2);   // 습도 (%)
-  float ww = fetchKMAObs("ww", stm1, stm2);   // 현천코드
-
-  if (!isnan(ta)) {
-    g_w.tempC   = (int)roundf(ta);
-    g_w.humiPct = isnan(hm) ? 0 : (int)roundf(hm);
-    strlcpy(g_w.condition, wwToCondition(isnan(ww) ? -1 : (int)ww), sizeof(g_w.condition));
-    g_w.valid   = true;
-    Serial.printf("[KMA] %s  %dC  %d%%  ww=%d  -> %s\n",
-                  g_w.city, g_w.tempC, g_w.humiPct, isnan(ww)?-1:(int)ww, g_w.condition);
-  } else {
-    Serial.println(F("[KMA] ta missing, keep previous"));
+  int code = http.GET();
+  Serial.printf("[WTTR] http=%d\n", code);
+  if (code == 200) {
+    StaticJsonDocument<128> filter;
+    filter["current_condition"][0]["temp_C"]                    = true;
+    filter["current_condition"][0]["weatherDesc"][0]["value"]   = true;
+    DynamicJsonDocument doc(512);
+    DeserializationError err = deserializeJson(doc, http.getStream(),
+                                               DeserializationOption::Filter(filter));
+    if (!err) {
+      const char* tStr = doc["current_condition"][0]["temp_C"] | "0";
+      const char* desc = doc["current_condition"][0]["weatherDesc"][0]["value"] | "";
+      g_w.tempC = atoi(tStr);
+      strlcpy(g_w.condition, descToCondition(String(desc)), sizeof(g_w.condition));
+      g_w.valid = true;
+      Serial.printf("[WTTR] OK  %s  %d'C  %s  (raw:%s)\n",
+                    g_w.city, g_w.tempC, g_w.condition, desc);
+    } else {
+      Serial.printf("[WTTR] parse err: %s\n", err.c_str());
+    }
   }
+  http.end();
 }
 
 // =============================================================================
@@ -493,7 +613,7 @@ void fetchHolidays() {
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setBufferSizes(2048, 512);
+  client.setBufferSizes(4096, 1024);
 
   HTTPClient http;
   String url = "https://date.nager.at/api/v3/PublicHolidays/" + String(year) + "/KR";
@@ -823,14 +943,14 @@ void drawClock(const struct tm* lt) {
   matrix.fillRect(14, 0, 2, 8, 0);   // 콜론 영역 초기화
 
   if (s < 30) {
-    // 상단: 시계방향 노랑 1개 회전 / 하단: 전체 하늘색
+    // 0~29s: 위쪽 CW 노랑 1개 회전 / 아래쪽 전체 하늘색 (점 유지)
     int yi = CW[s % 4];
     for (int i = 0; i < 4; i++) {
       matrix.drawPixel(UX[i], UY[i], (i == yi) ? C_YELLOW : C_CYAN);
       matrix.drawPixel(LX[i], LY[i], C_CYAN);
     }
   } else {
-    // 하단: 반시계방향 노랑 1개 회전 / 상단: 전체 하늘색
+    // 30~59s: 아래쪽 CCW 노랑 1개 회전 / 위쪽 전체 하늘색 (점 유지)
     int yi = CCW[(s - 30) % 4];
     for (int i = 0; i < 4; i++) {
       matrix.drawPixel(UX[i], UY[i], C_CYAN);
