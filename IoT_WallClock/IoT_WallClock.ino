@@ -1009,13 +1009,18 @@ void drawScrollInfo(const struct tm* lt) {
   bool holiday   = dateValid && isHoliday(lt->tm_mon + 1, lt->tm_mday);
   uint16_t colWeekday = (weekend || holiday) ? C_RED : C_GREEN;
 
-  // ---------- 2) 외부온도(wttr.in) + 실내습도(DHT11) "22C 49%  " ----------
-  char prefix[24];
+  // ---------- 2) 외부온도(wttr.in) + 실내습도(DHT11) "18°C 49%  " ----------
+  // 도(°) 기호는 폰트 대신 2×2 픽셀로 직접 그림 → prefixNum(숫자) + dot + prefixRest(C humi%)
+  char prefixNum[8]   = "";   // "18" 또는 "-5"
+  char prefixRest[20] = "";   // "C 44%  " 또는 "-- --  "
+  int  pxPrefixNum    = 0;
   if (g_w.valid) {
     int humi = isnan(g_humi) ? g_w.humiPct : (int)g_humi;  // DHT 실패 시 wttr.in 습도 fallback
-    snprintf(prefix, sizeof(prefix), "%d\260C %d%%  ", g_w.tempC, humi);  // \260=0xB0=°
+    snprintf(prefixNum,  sizeof(prefixNum),  "%d",       g_w.tempC);
+    snprintf(prefixRest, sizeof(prefixRest), "C %d%%  ", humi);
+    pxPrefixNum = (int)strlen(prefixNum) * 6;
   } else {
-    snprintf(prefix, sizeof(prefix), "-- --  ");
+    snprintf(prefixRest, sizeof(prefixRest), "-- --  ");
   }
 
   // ---------- 3) 날씨 단어 + 온도태그 (노랑 / 비 적색) "Cloud Warm " ----------
@@ -1035,7 +1040,10 @@ void drawScrollInfo(const struct tm* lt) {
   int pxDatePart = (int)strlen(datePart) * 6;
   int pxDayPart  = (int)strlen(dayPart)  * 6;
   int pxDate     = pxDatePart + pxDayPart;   // 스크롤 계산용 합계
-  int pxPrefix   = (int)strlen(prefix)   * 6;
+  // pxPrefix: 숫자px + 2×2도트(3px) + 나머지px  /  무효: 나머지만
+  int pxPrefix = g_w.valid
+                 ? pxPrefixNum + 3 + (int)strlen(prefixRest) * 6
+                 : (int)strlen(prefixRest) * 6;
   int pxSuffix   = (int)strlen(suffix)   * 6;
   int pxIcon     = g_w.valid ? 8 : 0;
   int totalPx    = pxDate + pxPrefix + pxSuffix + pxIcon;
@@ -1050,7 +1058,17 @@ void drawScrollInfo(const struct tm* lt) {
   matrix.setCursor(x, 0);  matrix.print(dayPart);   x += pxDayPart;
 
   matrix.setTextColor(colPrefix);
-  matrix.setCursor(x, 0);  matrix.print(prefix);    x += pxPrefix;
+  if (g_w.valid) {
+    // 온도 숫자
+    matrix.setCursor(x, 0);  matrix.print(prefixNum);  x += pxPrefixNum;
+    // 도(°) 기호: 2×2 픽셀을 y=0,1 (최상단) 에 표시
+    matrix.drawPixel(x,   0, colPrefix);
+    matrix.drawPixel(x+1, 0, colPrefix);
+    matrix.drawPixel(x,   1, colPrefix);
+    matrix.drawPixel(x+1, 1, colPrefix);
+    x += 3;   // 2px 도트 + 1px 간격
+  }
+  matrix.setCursor(x, 0);  matrix.print(prefixRest);  x += (int)strlen(prefixRest) * 6;
 
   matrix.setTextColor(colSuffix);
   matrix.setCursor(x, 0);  matrix.print(suffix);    x += pxSuffix;
