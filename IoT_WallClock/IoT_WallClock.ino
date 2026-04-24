@@ -563,18 +563,22 @@ void fetchWeatherWttr() {
   snprintf(locStr, sizeof(locStr), "%.4f,%.4f", g_lat, g_lon);
   Serial.printf("[WTTR] loc=%s  heap=%u\n", locStr, ESP.getFreeHeap());
 
-  WiFiClient client;   // HTTP — SSL 불필요
+  // wttr.in HTTP → HTTPS 리다이렉트 발생 → WiFiClientSecure 필요
+  // Cloudflare CDN 이므로 MFLN(RFC6066) 지원 → 4096 버퍼로 동작 가능
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setBufferSizes(4096, 1024);
+
   HTTPClient http;
-  String url = String("http://wttr.in/") + locStr + "?format=j1";
+  String url = String("https://wttr.in/") + locStr + "?format=j1";
   Serial.printf("[WTTR] %s\n", url.c_str());
 
   if (!http.begin(client, url)) {
     Serial.println(F("[WTTR] begin FAIL"));
     return;
   }
-  http.setTimeout(10000);
+  http.setTimeout(15000);
   http.setUserAgent("curl/7.68");
-  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
   int code = http.GET();
   Serial.printf("[WTTR] http=%d\n", code);
@@ -603,6 +607,8 @@ void fetchWeatherWttr() {
     }
   }
   http.end();
+  client.stop();
+  delay(200);   // SSL 세션 해제 대기
 }
 
 // =============================================================================
