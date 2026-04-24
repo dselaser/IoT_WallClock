@@ -391,8 +391,12 @@ float parseKMAValue(const String& body) {
     int sp = line.lastIndexOf(' ');
     String vs = (sp >= 0) ? line.substring(sp + 1) : line;
     vs.trim();
+    // 숫자 형식 검증: 숫자 또는 '-' 로 시작해야 유효
+    if (vs.length() == 0) continue;
+    char c0 = vs.charAt(0);
+    if (!isdigit((unsigned char)c0) && c0 != '-') continue;
     float v = vs.toFloat();
-    if (v > -999.0f) val = v;   // -9999: 결측
+    if (v > -999.0f) val = v;   // -9999: 결측값 제외
   }
   return val;
 }
@@ -414,7 +418,7 @@ float fetchKMAObs(const char* obs, const char* stm1, const char* stm2) {
   String url = String("https://apihub.kma.go.kr/api/typ01/cgi-bin/url/nph-sfc_obs_nc_pt_api?obs=") +
                obs +
                "&tm1=" + stm1 + "&tm2=" + stm2 +
-               "&itv=60" +
+               "&itv=10" +
                "&lon=" + String(g_lon, 4) +
                "&lat=" + String(g_lat, 4) +
                "&authKey=" + KMA_AUTH_KEY;
@@ -858,7 +862,7 @@ void drawScrollInfo(const struct tm* lt) {
   char prefix[24];
   if (g_w.valid) {
     int humi = isnan(g_humi) ? g_w.humiPct : (int)g_humi;  // DHT 실패 시 wttr.in 습도 fallback
-    snprintf(prefix, sizeof(prefix), "%dC %d%%  ", g_w.tempC, humi);
+    snprintf(prefix, sizeof(prefix), "%d'C %d%%  ", g_w.tempC, humi);
   } else {
     snprintf(prefix, sizeof(prefix), "-- --  ");
   }
