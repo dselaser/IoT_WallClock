@@ -579,20 +579,25 @@ void fetchWeatherWttr() {
   int code = http.GET();
   Serial.printf("[WTTR] http=%d\n", code);
   if (code == 200) {
-    StaticJsonDocument<128> filter;
+    // 필터 doc: 중첩 구조가 크므로 256 바이트 (128 이하면 오버플로 → 필드 누락)
+    StaticJsonDocument<256> filter;
     filter["current_condition"][0]["temp_C"]                    = true;
     filter["current_condition"][0]["weatherDesc"][0]["value"]   = true;
     DynamicJsonDocument doc(512);
     DeserializationError err = deserializeJson(doc, http.getStream(),
                                                DeserializationOption::Filter(filter));
     if (!err) {
-      const char* tStr = doc["current_condition"][0]["temp_C"] | "0";
+      const char* tStr = doc["current_condition"][0]["temp_C"] | "999";
       const char* desc = doc["current_condition"][0]["weatherDesc"][0]["value"] | "";
-      g_w.tempC = atoi(tStr);
-      strlcpy(g_w.condition, descToCondition(String(desc)), sizeof(g_w.condition));
-      g_w.valid = true;
-      Serial.printf("[WTTR] OK  %s  %d'C  %s  (raw:%s)\n",
-                    g_w.city, g_w.tempC, g_w.condition, desc);
+      Serial.printf("[WTTR] raw: temp_C=%s  desc=%s\n", tStr, desc);
+      if (tStr[0] != '9' || tStr[1] != '9' || tStr[2] != '9') {
+        g_w.tempC = atoi(tStr);
+        strlcpy(g_w.condition, descToCondition(String(desc)), sizeof(g_w.condition));
+        g_w.valid = true;
+        Serial.printf("[WTTR] OK  %s  %d'C  %s\n", g_w.city, g_w.tempC, g_w.condition);
+      } else {
+        Serial.println(F("[WTTR] temp_C missing — 필터 확인 필요"));
+      }
     } else {
       Serial.printf("[WTTR] parse err: %s\n", err.c_str());
     }
@@ -661,16 +666,22 @@ bool isHoliday(int mon, int day) {
 }
 
 const char* descToCondition(const String& d) {
-  if (d.indexOf("Thunder") >= 0 || d.indexOf("storm") >= 0) return "Storm";
-  if (d.indexOf("Snow") >= 0 || d.indexOf("Sleet")  >= 0 ||
-      d.indexOf("Blizzard") >= 0)                           return "Snow";
-  if (d.indexOf("Rain") >= 0 || d.indexOf("Drizzle") >= 0 ||
-      d.indexOf("Shower") >= 0)                             return "Rain";
-  if (d.indexOf("Fog") >= 0 || d.indexOf("Mist") >= 0)      return "Fog";
-  if (d.indexOf("Partly") >= 0)                             return "PCloud";
-  if (d.indexOf("Cloud") >= 0 || d.indexOf("Overcast") >= 0)return "Cloud";
-  if (d.indexOf("Sun") >= 0 || d.indexOf("Clear") >= 0)     return "Sunny";
-  return "---";
+  // wttr.in 반환 문자열: "Light rain", "Partly cloudy" 등 혼합 대소문자
+  // → 모두 소문자로 변환 후 비교
+  String dl = d; dl.toLowerCase();
+  if (dl.indexOf("thunder") >= 0 || dl.indexOf("storm")    >= 0) return "Storm";
+  if (dl.indexOf("snow")    >= 0 || dl.indexOf("sleet")    >= 0 ||
+      dl.indexOf("blizzard") >= 0 || dl.indexOf("ice")     >= 0) return "Snow";
+  if (dl.indexOf("rain")    >= 0 || dl.indexOf("drizzle")  >= 0 ||
+      dl.indexOf("shower")  >= 0)                               return "Rain";
+  if (dl.indexOf("fog")     >= 0 || dl.indexOf("mist")     >= 0 ||
+      dl.indexOf("haze")    >= 0)                               return "Fog";
+  if (dl.indexOf("partly")  >= 0)                               return "PCloud";
+  if (dl.indexOf("cloud")   >= 0 || dl.indexOf("overcast") >= 0) return "Cloud";
+  if (dl.indexOf("sun")     >= 0 || dl.indexOf("clear")    >= 0 ||
+      dl.indexOf("fair")    >= 0)                               return "Sunny";
+  Serial.printf("[DESC] no match: '%s'\n", d.c_str());
+  return "Cloud";   // 기본값: Cloud (--- 대신 의미 있는 값으로)
 }
 
 // --------------------------- 날씨 아이콘 8x8 (bit7 = 왼쪽) -------------------
