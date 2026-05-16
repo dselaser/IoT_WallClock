@@ -61,9 +61,9 @@
 // CDS raw 값이 이 이상이면 야간 모드 (주위 조명 꺼진 상태 → 시계만 표시)
 #define CDS_NIGHT_THRESHOLD   960
 
-#define CYCLE_MS          30000UL   // 전체 30초 주기
-#define CLOCK_PHASE_MS    15000UL   // 0~15s  : 시계
-                                    // 15~30s : 통합 스크롤 (날짜+온습도+날씨, 15s)
+#define SCROLL_START_SEC  30        // 매 분 30초부터 스크롤 시작 (1분 주기)
+                                    // tm_sec  0~29 : 시계
+                                    //        30~59 : 통합 스크롤 (날짜+온습도+날씨)
 
 #define KMA_AUTH_KEY  "sQokQxRvTTiKJEMUb904bA"
 
@@ -78,6 +78,7 @@
 #define C_RED     0xF800
 #define C_WHITE   0xFFFF
 #define C_GREEN   0x07E0
+#define C_MAGENTA 0xF816  // R=255, G=0, B=180 — 초 표시용 (시안의 보색)
 
 // --------------------------- 전역 객체 ---------------------------------------
 Adafruit_NeoMatrix matrix(MATRIX_W, MATRIX_H, LED_PIN,
@@ -225,27 +226,22 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // WiFi 상태 확인: 연결된 경우 그냥 pass, 끊긴 경우만 재스캔
-  // (RSSI 기반 능동 AP 전환 제거 → g_wifiMulti.run() 이 5초마다 블로킹하는 문제 해결)
+  // WiFi 상태 체크 — 완전 비블로킹.
+  //   끊김 감지 시 WiFi.reconnect() 만 호출하고 즉시 반환 → loop() 절대 멈추지 않음
+  //   SNTP 는 백그라운드에서 자동 재동기하므로 configTime() 재호출 불필요
+  //   (이전: g_wifiMulti.run(8000) 이 최대 8초 블로킹 → 시계·애니메이션 멈춤 유발)
   if (now - tWiFi >= WIFI_CHECK_INTERVAL) {
     tWiFi = now;
+    wl_status_t wst = WiFi.status();
     bool prevOK = g_wifiOK;
-    if (WiFi.status() == WL_CONNECTED) {
-      g_wifiOK = true;
-    } else {
-      Serial.println(F("[WiFi] 끊김 → 재스캔"));
-      g_wifiOK = (g_wifiMulti.run(8000) == WL_CONNECTED);
-      if (g_wifiOK)
-        Serial.printf("[WiFi] 재접속 → %s\n", WiFi.SSID().c_str());
-      else
-        Serial.println(F("[WiFi] 재접속 실패 → 내부 클록으로 시간 표시"));
-    }
-    // WiFi 복구 시에만 NTP 재동기 요청
-    // (loop 안에서 configTime() 반복 호출 금지: SNTP 리셋으로 time()=0 이 되어 시계 멈춤 유발)
-    if (g_wifiOK && !prevOK) {
-      configTime(TZ_OFFSET_SEC, DST_OFFSET_SEC,
-                 "pool.ntp.org", "time.google.com", "kr.pool.ntp.org");
-      Serial.println(F("[NTP] WiFi 복구 → NTP 재요청"));
+    g_wifiOK = (wst == WL_CONNECTED);
+
+    if (!g_wifiOK) {
+      Serial.printf("[WiFi] 끊김(status=%d) → reconnect() 비블로킹 요청\n", wst);
+      WiFi.reconnect();
+    } else if (!prevOK) {
+      Serial.printf("[WiFi] 복구 → %s  RSSI=%d dBm\n",
+                    WiFi.SSID().c_str(), WiFi.RSSI());
     }
   }
 
@@ -279,25 +275,28 @@ void loop() {
     updateBrightness();
   }
 
-  // Open-Meteo 날씨 갱신
-  //   wValid=false 동안 : 60초 재시도 (빠른 복구)
-  //   wValid=true  이후 : 5분 주기 갱신
-  {
+  // HTTPS 호출은 스크롤 구간(tm_sec >= 30)에서만 — 시계 표시 중 멈춤 방지
+  //   호출 자체는 최대 5초까지 블로킹할 수 있지만 이때는 시계가 안 보이므로
+  //   사용자 체감 영향 최소화 (스크롤이 5초 정도 멈췄다 재개되는 형태)
+  if (g_wifiOK && g_ntpSynced) {
+    time_t now_t = time(nullptr);
+    struct tm lt_chk;
+    localtime_r(&now_t, &lt_chk);
+    bool inScrollWindow = (lt_chk.tm_sec >= SCROLL_START_SEC);
+
+    // 날씨 갱신 — wValid=false: 60s 재시도 / wValid=true: 5분 주기
     unsigned long wIv = g_w.valid ? WEATHER_WW_INTERVAL : WEATHER_INTERVAL_MS;
-    if (g_wifiOK && g_ntpSynced && (now - tWeatherWW >= wIv)) {
+    if (inScrollWindow && (now - tWeatherWW >= wIv)) {
       tWeatherWW = now;
       fetchWeatherWttr();
     }
-  }
 
-  // 공휴일: 1시간 주기로 연도 변경 감지 (매 루프 실행 방지)
-  if (g_wifiOK && g_ntpSynced && (now - tHoliday >= 3600000UL)) {
-    tHoliday = now;
-    time_t t = time(nullptr);
-    struct tm lt2;
-    localtime_r(&t, &lt2);
-    int yr = lt2.tm_year + 1900;
-    if (yr >= 2024 && yr != g_holYear) fetchHolidays();
+    // 공휴일 — 1시간 주기로 연도 변경 감지 (실제 호출은 연 1회)
+    if (inScrollWindow && (now - tHoliday >= 3600000UL)) {
+      tHoliday = now;
+      int yr = lt_chk.tm_year + 1900;
+      if (yr >= 2024 && yr != g_holYear) fetchHolidays();
+    }
   }
 
   if (now - tFrame >= FRAME_INTERVAL_MS) {
@@ -571,6 +570,7 @@ void fetchWeatherWttr() {
   WiFiClientSecure client;
   client.setInsecure();
   client.setBufferSizes(4096, 1024);   // Cloudflare MFLN 지원
+  client.setTimeout(5000);             // TLS handshake/read 5초
 
   HTTPClient http;
   // %t = 온도(+18°C), %C = 날씨 설명, | = 구분자, lang=en 영문 강제
@@ -581,7 +581,7 @@ void fetchWeatherWttr() {
     Serial.println(F("[WTTR] begin FAIL"));
     return;
   }
-  http.setTimeout(15000);
+  http.setTimeout(5000);               // 15s → 5s 단축 (시계 멈춤 방지)
   http.setUserAgent("curl/7.68");
 
   int code = http.GET();
@@ -639,13 +639,14 @@ void fetchHolidays() {
   WiFiClientSecure client;
   client.setInsecure();
   client.setBufferSizes(4096, 1024);
+  client.setTimeout(5000);             // TLS handshake/read 5초
 
   HTTPClient http;
   String url = "https://date.nager.at/api/v3/PublicHolidays/" + String(year) + "/KR";
   Serial.print(F("[Holiday] GET ")); Serial.println(url);
 
   if (!http.begin(client, url)) { Serial.println(F("[Holiday] begin fail")); return; }
-  http.setTimeout(15000);
+  http.setTimeout(5000);               // 15s → 5s 단축
   http.setUserAgent("curl/7.68");
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
@@ -828,7 +829,7 @@ void updateBrightness() {
   int raw = analogRead(CDS_PIN);    // 0..1023
 
   // 밝기 구간
-  //   일반 (raw 350 ~ THRESHOLD): 150 → 5  (주위 밝기에 비례)
+  //   일반 (raw 350 ~ THRESHOLD): 200 → 5  (주위 밝기에 비례, 밝은 곳 1단계 ↑)
   //   야간 (raw THRESHOLD ~ 1023): 4  → 1  (조명 꺼진 상태, 극저)
   g_nightMode = (raw > CDS_NIGHT_THRESHOLD);
 
@@ -837,8 +838,8 @@ void updateBrightness() {
     b = map(raw, CDS_NIGHT_THRESHOLD, 1023, 4, 1);
     b = constrain(b, 1, 4);
   } else {
-    b = map(raw, 350, CDS_NIGHT_THRESHOLD, 150, 5);
-    b = constrain(b, 5, 150);
+    b = map(raw, 350, CDS_NIGHT_THRESHOLD, 200, 5);
+    b = constrain(b, 5, 200);
   }
 
   // 1차 IIR 필터 (깜빡임 방지) 3:1
@@ -867,15 +868,16 @@ void drawFrame() {
     return;
   }
 
-  unsigned long phase = millis() % CYCLE_MS;
   time_t nowT = time(nullptr);
   struct tm lt;
   localtime_r(&nowT, &lt);
+  // 1분 주기: 0~29s 시계 / 30~59s 스크롤 — NTP 시간 기준 매 분 30초에 스크롤 시작
+  bool clockPhase = (lt.tm_sec < SCROLL_START_SEC);
 
-  if (g_nightMode || phase < CLOCK_PHASE_MS || scrollDone) {
+  if (g_nightMode || clockPhase || scrollDone) {
     // 야간 모드 또는 시계 구간 또는 스크롤 완료 → 시계 표시
     drawClock(&lt);
-    if (!g_nightMode && phase < CLOCK_PHASE_MS) { // 시계 구간 진입 시 초기화
+    if (!g_nightMode && clockPhase) { // 시계 구간 진입 시 초기화
       scrollX    = MATRIX_W;
       scrollDone = false;
     }
@@ -1010,16 +1012,17 @@ void drawDigit(int x, int y, int d, uint16_t color) {
 }
 
 // =============================================================================
-// 시·분 숫자 슬라이드 다운 애니메이션 (5×8 폰트)
-//   값이 바뀌면 새 숫자가 위에서 내려오고, 이전 숫자는 그대로 아래로 사라진다.
-//   매 drawFrame(50ms) 1픽셀씩, 총 DIGIT_ANIM_FRAMES 프레임에 걸쳐 완료.
+// 시·분 숫자 슬라이드 애니메이션 (5×8 폰트, 경과 시간 기준)
+//   값이 바뀌면 새 숫자가 위/아래에서 들어오고, 이전 숫자는 반대 방향으로 빠진다.
+//   millis() 경과 시간 기반이라 drawFrame() 호출이 일시적으로 늦어져도
+//   "올바른 위치"로 점프해서 진행 → 깨짐 없음. 총 DIGIT_ANIM_MS 동안 완료.
 // =============================================================================
-#define DIGIT_ANIM_FRAMES  8
+#define DIGIT_ANIM_MS   400UL   // 슬라이드 1회 총 소요 시간 (ms)
 
 struct DigitAnim {
-  int8_t cur;     // 현재 숫자 (-1: 미표시)
-  int8_t prev;    // 이전 숫자 (-1: 미표시)
-  int8_t frame;   // 남은 프레임 수 (0: 정적)
+  int8_t   cur;        // 현재 숫자 (-1: 미표시)
+  int8_t   prev;       // 이전 숫자 (-1: 미표시)
+  uint32_t animStart;  // 슬라이드 시작 시각 (millis()), 0 = 정적
 };
 static DigitAnim g_dig[4] = {
   {-1, -1, 0}, {-1, -1, 0}, {-1, -1, 0}, {-1, -1, 0}
@@ -1040,22 +1043,67 @@ static void drawDigitClipped(int x, int y, int d, uint16_t color, int yMin, int 
 }
 
 // idx 자리의 숫자가 newD 로 바뀌면 슬라이드 시작.
-//   step = 1..N : 새 숫자 y = -8+dy, 이전 숫자 y = dy  (dy = step·8 / N)
-static void drawDigitAnim(int idx, int x, int newD, uint16_t color, int yMin, int yMax) {
+//   slideUp=false (다운): 새 숫자 y=-8→0  / 이전 숫자 y=0→+8
+//   slideUp=true  (업)  : 새 숫자 y=+8→0 / 이전 숫자 y=0→-8
+// 경과 시간(elapsed) 기반 위치 계산 — drawFrame() 호출이 늦어져도
+// 다음 호출 시 올바른 위치로 점프 (애니메이션 깨짐 방지)
+static void drawDigitAnim(int idx, int x, int newD, uint16_t color,
+                          int yMin, int yMax, bool slideUp) {
   DigitAnim* a = &g_dig[idx];
+  uint32_t now = millis();
   if (newD != a->cur) {
-    a->prev  = a->cur;
-    a->cur   = newD;
-    a->frame = DIGIT_ANIM_FRAMES;
+    a->prev      = a->cur;
+    a->cur       = newD;
+    a->animStart = now ? now : 1;   // 0 은 정적 상태로 예약
   }
-  if (a->frame > 0) {
-    int step = DIGIT_ANIM_FRAMES - a->frame + 1;
-    int dy   = (step * 8 + DIGIT_ANIM_FRAMES / 2) / DIGIT_ANIM_FRAMES;
-    drawDigitClipped(x, -8 + dy, a->cur,  color, yMin, yMax);
-    drawDigitClipped(x,      dy, a->prev, color, yMin, yMax);
-    a->frame--;
+  if (a->animStart != 0) {
+    uint32_t elapsed = now - a->animStart;
+    if (elapsed >= DIGIT_ANIM_MS) {
+      a->animStart = 0;   // 완료 → 정적 표시로 전환
+      drawDigitClipped(x, 0, a->cur, color, yMin, yMax);
+    } else {
+      // 시간 기반 진행도 → 픽셀 (0..8)
+      int dy = (int)((elapsed * 8 + DIGIT_ANIM_MS / 2) / DIGIT_ANIM_MS);
+      if (dy > 8) dy = 8;
+      if (slideUp) {
+        drawDigitClipped(x,  8 - dy, a->cur,  color, yMin, yMax);
+        drawDigitClipped(x,     -dy, a->prev, color, yMin, yMax);
+      } else {
+        drawDigitClipped(x, -8 + dy, a->cur,  color, yMin, yMax);
+        drawDigitClipped(x,      dy, a->prev, color, yMin, yMax);
+      }
+    }
   } else {
     drawDigitClipped(x, 0, a->cur, color, yMin, yMax);
+  }
+}
+
+// =============================================================================
+// 3×5 미니 픽셀 폰트 (숫자 0~9) — 초 표시 전용
+//   bit2 = 왼쪽, bit0 = 오른쪽 (3비트 유효), 각 글자 5행
+//   매트릭스 우측 하단(x=25..31, y=3..7) 영역에 7×5 픽셀로 SS 표시
+// =============================================================================
+const uint8_t PROGMEM FONT_3X5[10][5] = {
+  { 0x07, 0x05, 0x05, 0x05, 0x07 }, // 0
+  { 0x02, 0x06, 0x02, 0x02, 0x07 }, // 1
+  { 0x07, 0x01, 0x07, 0x04, 0x07 }, // 2
+  { 0x07, 0x01, 0x07, 0x01, 0x07 }, // 3
+  { 0x05, 0x05, 0x07, 0x01, 0x01 }, // 4
+  { 0x07, 0x04, 0x07, 0x01, 0x07 }, // 5
+  { 0x07, 0x04, 0x07, 0x05, 0x07 }, // 6
+  { 0x07, 0x01, 0x02, 0x02, 0x02 }, // 7
+  { 0x07, 0x05, 0x07, 0x05, 0x07 }, // 8
+  { 0x07, 0x05, 0x07, 0x01, 0x07 }, // 9
+};
+
+// 3×5 미니 폰트 한 자리 숫자 그리기
+static void drawSmallDigit(int x, int y, int d, uint16_t color) {
+  if (d < 0 || d > 9) return;
+  for (int r = 0; r < 5; r++) {
+    uint8_t row = pgm_read_byte(&FONT_3X5[d][r]);
+    for (int c = 0; c < 3; c++) {
+      if (row & (1 << (2 - c))) matrix.drawPixel(x + c, y + r, color);
+    }
   }
 }
 
@@ -1093,50 +1141,37 @@ void drawClock(const struct tm* lt) {
   int h = lt->tm_hour % 12;
   if (h == 0) h = 12;
   int m = lt->tm_min;
-
-  // 커스텀 5×8 비트맵 폰트 "HH:MM" — 자리별 슬라이드 다운 애니메이션
-  // 숫자 영역(x=1..11, 19..29)은 콜론(x=14,15)과 분리되므로 y=0..7 전체 사용
-  int h10 = (h >= 10) ? (h / 10) : -1;
-  drawDigitAnim(0,  1, h10,    C_CYAN, 0, 7);
-  drawDigitAnim(1,  7, h % 10, C_CYAN, 0, 7);
-  drawDigitAnim(2, 19, m / 10, C_CYAN, 0, 7);
-  drawDigitAnim(3, 25, m % 10, C_CYAN, 0, 7);
-
-  // ── 콜론 애니메이션 ──────────────────────────────────────────────────────
-  // 상단 2×2 = 4픽셀:  [0(14,1)][1(15,1)]
-  //                    [2(14,2)][3(15,2)]
-  // 하단 2×2 = 4픽셀:  [0(14,4)][1(15,4)]
-  //                    [2(14,5)][3(15,5)]
-  //
-  //  0~29s : 상단 4점 활성 — 시계방향(CW)  0→1→3→2 로 노랑 1개 이동
-  // 30~59s : 하단 4점 활성 — 반시계(CCW)  0→2→3→1 로 노랑 1개 이동
-  // (비활성 그룹은 소등)
-  static const uint8_t CW[4]  = {0, 1, 3, 2}; // 시계방향 순서
-  static const uint8_t CCW[4] = {0, 2, 3, 1}; // 반시계방향 순서
-  // 상단/하단 각 점의 (x, y)
-  static const uint8_t UX[4] = {14, 15, 14, 15};
-  static const uint8_t UY[4] = { 1,  1,  2,  2};
-  static const uint8_t LX[4] = {14, 15, 14, 15};
-  static const uint8_t LY[4] = { 4,  4,  5,  5};
-
   int s = lt->tm_sec;
-  matrix.fillRect(14, 0, 2, 8, 0);   // 콜론 영역 초기화
 
-  if (s < 30) {
-    // 0~29s: 위쪽 CW 노랑 1개 회전 / 아래쪽 전체 하늘색 (점 유지)
-    int yi = CW[s % 4];
-    for (int i = 0; i < 4; i++) {
-      matrix.drawPixel(UX[i], UY[i], (i == yi) ? C_YELLOW : C_CYAN);
-      matrix.drawPixel(LX[i], LY[i], C_CYAN);
-    }
-  } else {
-    // 30~59s: 아래쪽 CCW 노랑 1개 회전 / 위쪽 전체 하늘색 (점 유지)
-    int yi = CCW[(s - 30) % 4];
-    for (int i = 0; i < 4; i++) {
-      matrix.drawPixel(UX[i], UY[i], C_CYAN);
-      matrix.drawPixel(LX[i], LY[i], (i == yi) ? C_YELLOW : C_CYAN);
-    }
-  }
+  // ───── 픽셀 레이아웃 (총 32픽셀) ──────────────────────────────────────
+  //  H10 : x=0..4    (5×8 폰트)
+  //  gap : x=5
+  //  H1  : x=6..10   (5×8 폰트)
+  //  sp  : x=11
+  //  : (콜론) x=12   (1픽셀 폭, 1초 단위 위/아래 토글)
+  //  sp  : x=13
+  //  M10 : x=14..18  (5×8 폰트)
+  //  gap : x=19
+  //  M1  : x=20..24  (5×8 폰트)
+  //  S10 : x=25..27  (3×5 미니 폰트, y=3..7)
+  //  gap : x=28
+  //  S1  : x=29..31  (3×5 미니 폰트, y=3..7)
+  //
+  // 시·분 슬라이드 방향: H10=Up, H1=Down, M10=Up, M1=Down (UD:UD 패턴)
+  int h10 = (h >= 10) ? (h / 10) : -1;
+  drawDigitAnim(0,  0, h10,    C_CYAN, 0, 7, true);   // H10: 슬라이드 업
+  drawDigitAnim(1,  6, h % 10, C_CYAN, 0, 7, false);  // H1 : 슬라이드 다운
+  drawDigitAnim(2, 14, m / 10, C_CYAN, 0, 7, true);   // M10: 슬라이드 업
+  drawDigitAnim(3, 20, m % 10, C_CYAN, 0, 7, false);  // M1 : 슬라이드 다운
+
+  // 콜론: x=12 1픽셀 폭, 두 점(y=2, y=5) 시안색 정적 표시
+  matrix.drawPixel(12, 2, C_CYAN);
+  matrix.drawPixel(12, 5, C_CYAN);
+
+  // 초: 3×5 미니 폰트, 매트릭스 우측 하단 (y=3..7)
+  //     1초마다 즉시 변경 (애니메이션 없음). 분(시안)과 구분 위해 마젠타
+  drawSmallDigit(25, 3, s / 10, C_MAGENTA);
+  drawSmallDigit(29, 3, s % 10, C_MAGENTA);
 }
 
 void drawScrollInfo(const struct tm* lt) {
